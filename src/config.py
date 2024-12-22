@@ -8,7 +8,7 @@ import torch
 from transformer_lens import HookedTransformerConfig
 
 @dataclass(kw_only=True)
-class LoRSAConfig:
+class LorsaConfig:
     # self attention head config
     d_qk_head: int
     d_ov_head: int
@@ -18,14 +18,16 @@ class LoRSAConfig:
     dtype: torch.dtype = torch.float32
     virtual_kv_num: int = 0
     use_z_relu: bool = False
+    n_ctx: int = 256
     
     mode: Literal["default", "top_k", "l2"] = "default"
     top_k: Optional[int] = None
     
+    avg_norm: dict = None
+    
     # config from model config
     d_model: Optional[int] = None
     attn_scale: Optional[float] = None
-    n_ctx: Optional[int] = None
     positional_embedding_type: Literal["default", "rotary"] = "rotary"
     rotary_scale: int = 1
     rotary_dim: Optional[int] = None
@@ -35,7 +37,6 @@ class LoRSAConfig:
     def update_from_model_config(self, model_cfg: HookedTransformerConfig):
         self.d_model = model_cfg.d_model
         self.attn_scale = model_cfg.attn_scale
-        self.n_ctx = model_cfg.n_ctx
         self.positional_embedding_type = model_cfg.positional_embedding_type
         self.rotary_base = model_cfg.rotary_base
         self.rotary_adjacent_pairs = model_cfg.rotary_adjacent_pairs
@@ -48,13 +49,16 @@ class LoRSAConfig:
             raise ValueError("top_k must be less than or equal to n_ov_heads")
 
 @dataclass(kw_only=True)
-class LoRSATrainConfig:
+class LorsaTrainConfig:
     # lorsa config
-    lorsa_config: LoRSAConfig
+    lorsa_config: LorsaConfig
     
     # dataset config
     dataset_path: str
+    dataset_type: Literal["text", "activation"]
     num_workers: int
+    lm_batch_size: int
+    buffer_size: int
     
     # training config
     batch_size: int
@@ -63,7 +67,7 @@ class LoRSATrainConfig:
     final_learning_rate: float
     lr_warm_up_tokens: int
     lr_cool_down_tokens: int
-    device: Literal["cpu", "cuda"] = 'cuda'
+    clip_grad_norm: float
     mode: Literal["default", "top_k", "l2"] = "default"
     init_scale_parameters: bool = True
     
@@ -79,7 +83,6 @@ class LoRSATrainConfig:
     # orig attention head config
     model_name: str
     layer: int
-    max_length: int
     prepend_bos: bool
     
     # wandb config
@@ -96,10 +99,34 @@ class LoRSATrainConfig:
         self.lorsa_config.mode = self.mode
 
 @dataclass(kw_only=True)
+class LorsaAnalyzeConfig:
+    # lorsa config
+    lorsa_config: LorsaConfig
+    
+    # dataset config
+    dataset_path: str
+    dataset_type: Literal["text", "activation"]
+    num_workers: int
+    lm_batch_size: int
+    buffer_size: int
+    
+    # orig attention head config
+    model_name: str
+    layer: int
+    prepend_bos: bool
+    
+    # db config
+    mongo_uri: str
+    mongo_db: str
+
+@dataclass(kw_only=True)
 class DataGenConfig:
     # base config
     device: str = 'cuda'
     dtype: torch.dtype = torch.bfloat16
+
+    # parallel config
+    num_proc: int
 
     # dataset config
     dataset_path: str
@@ -109,10 +136,10 @@ class DataGenConfig:
     use_flash_attn: bool
 
     # data config
-    layers: []
+    layers: list = None
     n_batchs: int
     batch_size: int
-    max_length: int
+    n_ctx: int
     prepend_bos: bool
 
     # result config

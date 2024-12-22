@@ -6,3 +6,4 @@ result/
 *.pyc
 __pycache__/
 Language-Model-SAEs/
+training_data/
