@@ -1,0 +1,33 @@
+WANDB_CONSOLE=off WANDB_MODE=offline python exp/train_lorsa.py \
+    --model /inspire/hdd/ws-8207e9e2-e733-4eec-a475-cfa1c36480ba/embodied-multimodality/public/zfhe/models/pythia-160m \
+    -l 3 \
+    --prepend_bos \
+    --dataset_path /inspire/hdd/ws-8207e9e2-e733-4eec-a475-cfa1c36480ba/embodied-multimodality/public/zfhe/jx_projects/Lorsa/training_data/Slimpajama_B512_L256 \
+    --dataset_type activation \
+    --num_workers 4 \
+    --lm_batch_size 256 \
+    --buffer_size 4096 \
+    -b 32 \
+    --total_tokens 800_000_000 \
+    --lr 2e-3 \
+    --final_lr 2e-5 \
+    --lr_warm_up_tokens 20_000_000 \
+    --lr_cool_down_tokens 160_000_000 \
+    --clip_grad_norm 0.15 \
+    --init_scale \
+    --mode top_k \
+    --top_k 64 \
+    --start_k 768 \
+    --k_warm_up_tokens 50_000_000 \
+    --k_scheduler_name exponential \
+    --n_ctx 256 \
+    --n_qk_heads 48 \
+    --n_ov_heads 768 \
+    --d_qk_head 16 \
+    --d_ov_head 1 \
+    --rotary_scale 1 \
+    --rotary_dim 16 \
+    --wandb_project pythia-160m-lorsa \
+    --wandb_entity fnlp-mechinterp \
+    --result_dir ./result \
+    # --log_to_wandb \
