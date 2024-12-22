@@ -34,9 +34,10 @@ def train_lorsa(lorsa: LowRankSparseAttention, model: HookedTransformer, cfg: Lo
     # optimizer and scheduler
     optimizer = torch.optim.Adam(lorsa.parameters(), lr=0)
     lr_scheduler = LrWarmupScheduler(optimizer, cfg.learning_rate, cfg.final_learning_rate, cfg.lr_warm_up_tokens, cfg.lr_cool_down_tokens, cfg.total_tokens)
-    k_scheduler = TopkWarmupScheduler(lorsa, cfg.start_k, cfg.end_k, cfg.k_scheduler_name, cfg.k_warm_up_tokens, cfg.total_tokens)
     lr_scheduler.update_lr(0)
-    k_scheduler.update_k(0)
+    if cfg.mode == "top_k":
+        k_scheduler = TopkWarmupScheduler(lorsa, cfg.start_k, cfg.end_k, cfg.k_scheduler_name, cfg.k_warm_up_tokens, cfg.total_tokens)
+        k_scheduler.update_k(0)
 
     if cfg.init_scale_parameters:
         with torch.no_grad():
@@ -44,8 +45,8 @@ def train_lorsa(lorsa: LowRankSparseAttention, model: HookedTransformer, cfg: Lo
             hook_in, hook_out = lorsa.scale_norm(hook_in, hook_out)
             if cfg.mode == "top_k":
                 out, _ = lorsa.forward_top_k(hook_in)
-            elif cfg.mode == "l2":
-                out, _ = lorsa.forward_l2(hook_in)
+            elif cfg.mode == "l1":
+                out, _ = lorsa.forward_l1(hook_in)
             elif cfg.mode == "default":
                 out = lorsa.forward(hook_in)
             
@@ -60,10 +61,12 @@ def train_lorsa(lorsa: LowRankSparseAttention, model: HookedTransformer, cfg: Lo
         if cfg.mode == "top_k":
             head_use_count = torch.zeros(cfg.lorsa_config.n_ov_heads, device=cfg.lorsa_config.device)
             tokens_count = 0
+            
     while sampled_tokens < cfg.total_tokens:
         # schedular update
         lr_scheduler.update_lr(sampled_tokens)
-        k_scheduler.update_k(sampled_tokens)
+        if cfg.mode == "top_k":
+            k_scheduler.update_k(sampled_tokens)
         
         # get act
         hook_in, hook_out, filter_mask = activation_dataset.next(batch_size=cfg.batch_size)
