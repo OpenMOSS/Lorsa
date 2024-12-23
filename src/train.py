@@ -72,7 +72,7 @@ def train_lorsa(lorsa: LowRankSparseAttention, model: HookedTransformer, cfg: Lo
         hook_in, hook_out, filter_mask = activation_dataset.next(batch_size=cfg.batch_size)
         hook_in, hook_out = lorsa.scale_norm(hook_in, hook_out)
         if cfg.mode == "top_k":
-            out, top_k_mask = lorsa.forward_top_k(hook_in)
+            out, top_k_z = lorsa.forward_top_k(hook_in)
             mse_loss = F.mse_loss(out[filter_mask], hook_out[filter_mask])
             loss = mse_loss
         elif cfg.mode == "l2":
@@ -97,6 +97,7 @@ def train_lorsa(lorsa: LowRankSparseAttention, model: HookedTransformer, cfg: Lo
         sampled_tokens += filter_mask.sum().item()
         if cfg.log_to_wandb and cfg.mode == "top_k":
             tokens_count += filter_mask.sum().item()
+            top_k_mask = (top_k_z > 0.).to(torch.int32)
             counts = torch.sum(top_k_mask[filter_mask], dim=0)
             head_use_count += counts
         step += 1

@@ -13,6 +13,10 @@ from tqdm import tqdm
 
 from config import LorsaTrainConfig
 
+
+
+
+
 class MultiKeyDataset(torch.utils.data.Dataset):
     def __init__(self, dataset, keys: list, dtypes: list):
         self.dataset = dataset
@@ -92,7 +96,36 @@ class TextActivationDataset(ActivationDataset):
             self.act_buffer['output'][self.index:self.index+self.cfg.lm_batch_size] = cache[self.hook_out_name].to(self.cfg.lorsa_config.dtype)
             self.act_buffer['filter_mask'][self.index:self.index+self.cfg.lm_batch_size] = filter_mask
             self.index += self.cfg.lm_batch_size
-        
+
+
+class PresaveLoadingDataset(torch.utils.data.Dataset):
+    def __init__(self, file_paths, cfg):
+        """
+        Initialize the dataset with file paths and configuration.
+        """
+        self.file_paths = file_paths
+        self.cfg = cfg
+
+    def __len__(self):
+        """
+        Returns the number of batches available in the dataset.
+        """
+        return len(self.file_paths['input'])
+
+    def __getitem__(self, index):
+        """
+        Load and return a batch of data.
+        """
+        input_tensor = torch.load(self.file_paths['input'][index], weights_only=True).to(self.cfg.lorsa_config.dtype).to(self.cfg.lorsa_config.device, non_blocking=True)
+        output_tensor = torch.load(self.file_paths['output'][index], weights_only=True).to(self.cfg.lorsa_config.dtype).to(self.cfg.lorsa_config.device, non_blocking=True)
+        filter_mask = torch.load(self.file_paths['filter_mask'][index], weights_only=True).to(self.cfg.lorsa_config.device, non_blocking=True)
+
+        return {
+            'input': input_tensor,
+            'output': output_tensor,
+            'filter_mask': filter_mask
+        }
+
 
 class PresaveActivationDataset(ActivationDataset):
     def __init__(self, cfg: LorsaTrainConfig):
@@ -153,17 +186,19 @@ class PresaveActivationDataset(ActivationDataset):
         self.file_paths['filter_mask'] += filter_mask_file_paths
     
     def load_data(self, i, file_paths):
-        input_tensor = torch.load(file_paths['input'][i], weights_only=True, map_location='cpu').to(self.cfg.lorsa_config.dtype)
-        output_tensor = torch.load(file_paths['output'][i], weights_only=True, map_location='cpu').to(self.cfg.lorsa_config.dtype)
-        filter_mask = torch.load(file_paths['filter_mask'][i], weights_only=True, map_location='cpu')
+        start_idx = self.index + i * self.cfg.lm_batch_size
+        end_idx = self.index + (i + 1) * self.cfg.lm_batch_size
 
-        # 返回局部缓冲区的数据和索引
-        return {
-            'index': i,
-            'input': input_tensor,
-            'output': output_tensor,
-            'filter_mask': filter_mask
-        }
+        self.act_buffer['input'][start_idx:end_idx] = torch.load(file_paths['input'][i], weights_only=True).to(self.cfg.lorsa_config.dtype).to(self.cfg.lorsa_config.device, non_blocking=True)
+        self.act_buffer['output'][start_idx:end_idx] = torch.load(file_paths['output'][i], weights_only=True).to(self.cfg.lorsa_config.dtype).to(self.cfg.lorsa_config.device, non_blocking=True)
+        self.act_buffer['filter_mask'][start_idx:end_idx] = torch.load(file_paths['filter_mask'][i], weights_only=True).to(self.cfg.lorsa_config.device, non_blocking=True)
+
+        # return {
+        #     'index': i,
+        #     'input': input_tensor,
+        #     'output': output_tensor,
+        #     'filter_mask': filter_mask
+        # }
         
     def fill(self):
         file_num = (self.cfg.buffer_size - self.index) // self.cfg.lm_batch_size
@@ -176,15 +211,8 @@ class PresaveActivationDataset(ActivationDataset):
                 for i in range(file_num)
             ]
 
-            for future in tqdm(futures, desc="fill buffer"):
-                result = future.result()
-                i = result['index']
-                start_idx = self.index + i * self.cfg.lm_batch_size
-                end_idx = self.index + (i + 1) * self.cfg.lm_batch_size
-
-                self.act_buffer['input'][start_idx:end_idx] = result['input'].to(self.cfg.lorsa_config.device)
-                self.act_buffer['output'][start_idx:end_idx] = result['output'].to(self.cfg.lorsa_config.device)
-                self.act_buffer['filter_mask'][start_idx:end_idx] = result['filter_mask'].to(self.cfg.lorsa_config.device)
+            # for future in futures:
+            #     result = future.result()
       
         self.index += file_num * self.cfg.lm_batch_size
 

@@ -207,6 +207,10 @@ class LowRankSparseAttention(nn.Module):
         
         return z
     
+    def decode_z_with_W_O(z):
+        # There may be some accuracy differences compared to using F.linear to operate directly with W_O and b_O  
+        return torch.einsum("bqhd,hdm->bqm", z, self.W_O)  # Shape: (batch_size, query_pos, d_model)
+    
     def cal_out(self, resid: torch.Tensor) -> torch.Tensor:
         
         '''
@@ -219,10 +223,7 @@ class LowRankSparseAttention(nn.Module):
         
         z = self.cal_z_with_h(v, pattern) # Shape: (batch_size, query_pos, n_heads, d_head)
 
-        # There may be some accuracy differences compared to using F.linear to operate directly with W_O and b_O
-        out = torch.einsum("bqhd,hdm->bqm", z, self.W_O)  # Shape: (batch_size, query_pos, d_model)
-        
-        return out
+        return self.decode_z_with_W_O(z)
     
     def cal_out_with_k(self, resid: torch.Tensor) -> torch.Tensor:
         
@@ -235,10 +236,8 @@ class LowRankSparseAttention(nn.Module):
         pattern = self.cal_pattern(q, k) # Shape: (batch_size, n_heads, query_pos, key_pos)
         
         z = self.cal_z_with_k_h(v, pattern) # Shape: (batch_size, query_pos, key_pos, n_heads, d_head)
-        
-        out = torch.einsum("bqknh,nhm->bqkm", z, self.W_O) # Shape: (batch_size, query_pos, key_pos, d_model)
-        
-        return out
+                
+        return self.decode_z_with_W_O(z)
         
     
     def cal_out_with_k_h(self, resid: torch.Tensor) -> torch.Tensor:
@@ -252,10 +251,8 @@ class LowRankSparseAttention(nn.Module):
         pattern = self.cal_pattern(q, k) # Shape: (batch_size, n_heads, query_pos, key_pos)
         
         z = self.cal_z_with_k_h(v, pattern) # Shape: (batch_size, query_pos, key_pos, n_heads, d_head)
-        
-        out = torch.einsum("bqknh,nhm->bqknm", z, self.W_O) # Shape: (batch_size, query_pos, key_pos, n_heads, d_model)
-        
-        return out
+
+        return self.decode_z_with_W_O(z)
     
     def cal_out_with_h(self, resid: torch.Tensor, mode = None) -> torch.Tensor:
         
@@ -343,7 +340,7 @@ class LowRankSparseAttention(nn.Module):
         # out: (batch_size, query_pos, d_model)
         out = torch.einsum("bqhd,hdm->bqm", top_k_z, self.W_O)
 
-        return out, top_k_mask
+        return out, top_k_z
 
     def cal_out_top_k_for_ov1_flash_attn(self, resid: torch.Tensor):
         # q, k, v: (batch_size, query_pos, n_heads, d_head)
@@ -370,9 +367,9 @@ class LowRankSparseAttention(nn.Module):
         top_k_z = z * top_k_mask.unsqueeze(-1)
 
         # out: (batch_size, query_pos, d_model)
-        out = torch.einsum("bqhd,hdm->bqm", top_k_z, self.W_O)
+        out = self.decode_z_with_W_O(top_k_z)
 
-        return out, top_k_mask
+        return out, top_k_z
 
     def forward(self, resid: torch.Tensor) -> torch.Tensor:
         out = self.cal_out(resid) # Shape: (batch_size, query_pos, d_model)
@@ -381,13 +378,12 @@ class LowRankSparseAttention(nn.Module):
     
     def forward_top_k(self, resid: torch.Tensor) -> torch.Tensor:
         if self.cfg.d_ov_head == 1:
-            out, top_k_mask = self.cal_out_top_k_for_ov1(resid) # Shape: (batch_size, query_pos, d_model) (batch_size, seq_len, top_k)
+            out, top_k_z = self.cal_out_top_k_for_ov1(resid) # Shape: (batch_size, query_pos, d_model) (batch_size, seq_len, top_k)
         else:
-            print('Not implemented yet')
-            exit()
-            # out, top_k_mask = self.cal_out_top_k(resid) # Shape: (batch_size, query_pos, d_model) (batch_size, seq_len, top_k)
+            raise NotImplementedError('Not implemented yet')
+            # out, top_k_z = self.cal_out_top_k(resid) # Shape: (batch_size, query_pos, d_model) (batch_size, seq_len, top_k)
         out = out + self.b_O
-        return out, top_k_mask # Shape: (batch_size, query_pos, d_model)
+        return out, top_k_z # Shape: (batch_size, query_pos, d_model)
     
     def forward_l2(self, resid: torch.Tensor) -> torch.Tensor:
         out = self.cal_out_with_h(resid)

@@ -21,9 +21,25 @@ import copy
 
 def train_lorsa_runner(cfg: LorsaTrainConfig):
     # load model
-    hf_model = GPTNeoXForCausalLM.from_pretrained(cfg.model_name)
-    tokenizer = GPTNeoXTokenizerFast.from_pretrained(cfg.model_name)
-    model = HookedTransformer.from_pretrained_no_processing(cfg.model_name, use_flash_attn=True, hf_model=hf_model, tokenizer=tokenizer, device=cfg.lorsa_config.device, dtype=cfg.lorsa_config.dtype)
+    hf_model = GPTNeoXForCausalLM.from_pretrained(
+        cfg.model, 
+        local_files_only=True
+    )
+    tokenizer = GPTNeoXTokenizerFast.from_pretrained(
+        cfg.model, 
+        local_files_only=True
+    )
+
+    model = HookedTransformer.from_pretrained_no_processing(
+        cfg.model_name, 
+        use_flash_attn=True, 
+        hf_model=hf_model,
+        hf_config=hf_model.config,
+        tokenizer=tokenizer,
+        device=cfg.lorsa_config.device,
+        dtype=cfg.lorsa_config.dtype,
+        
+    )
     model.offload_params_after(f'blocks.{cfg.layer}.hook_attn_out', torch.tensor([[0]], device=cfg.lorsa_config.device))
     model.eval()
     for param in model.parameters():

@@ -82,6 +82,7 @@ class LorsaTrainConfig:
     
     # orig attention head config
     model_name: str
+    model: str
     layer: int
     prepend_bos: bool
     
