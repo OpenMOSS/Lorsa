@@ -349,12 +349,12 @@ class LowRankSparseAttention(nn.Module):
     
     def forward_top_k(self, resid: torch.Tensor) -> torch.Tensor:
         if self.cfg.d_ov_head == 1:
-            out, top_k_z = self.cal_out_top_k_for_ov1(resid) # Shape: (batch_size, query_pos, d_model) (batch_size, seq_len, top_k)
+            out, top_k_z = self.cal_out_top_k_for_ov1(resid) # Shape: (batch_size, query_pos, d_model) (batch_size, seq_len, n_heads, d_head)
         else:
             raise NotImplementedError('Not implemented yet')
             # out, top_k_z = self.cal_out_top_k(resid) # Shape: (batch_size, query_pos, d_model) (batch_size, seq_len, top_k)
         out = out + self.b_O
-        return out, top_k_z # Shape: (batch_size, query_pos, d_model)
+        return out, top_k_z # Shape: (batch_size, query_pos, d_model) (batch_size, seq_len, n_heads, d_head)
     
     def forward_l1(self, resid: torch.Tensor) -> torch.Tensor:
         out = self.cal_out_with_h(resid)

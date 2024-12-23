@@ -93,11 +93,14 @@ def train_lorsa(lorsa: LowRankSparseAttention, model: HookedTransformer, cfg: Lo
         )
         optimizer.step() 
 
-        # update cotrol info
+        # update head info
         sampled_tokens += filter_mask.sum().item()
         if cfg.log_to_wandb and cfg.mode == "top_k":
             tokens_count += filter_mask.sum().item()
-            top_k_mask = (top_k_z > 0.).to(torch.int32)
+            if cfg.lorsa_config.d_ov_head == 1:
+                top_k_mask = (top_k_z.squeeze(dim=-1) != 0.).to(torch.int32)
+            else:
+                raise NotImplementedError
             counts = torch.sum(top_k_mask[filter_mask], dim=0)
             head_use_count += counts
         step += 1
