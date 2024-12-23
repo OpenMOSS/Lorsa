@@ -38,8 +38,8 @@ parser.add_argument('-k', '--top_k', type=int, required=False, default=16, help=
 parser.add_argument('--start_k', type=int, required=False, default=16, help='initial nums of top heads')
 parser.add_argument('--k_warm_up_tokens', type=int, required=False, default=0, help='k warm up tokens')
 parser.add_argument('--k_scheduler_name', type=str, required=False, default='linear', help='k scheduler name')
-# l2 config
-parser.add_argument('--l2_coef', type=float, required=False, default=1e-5, help='l2 coef')
+# l1 config
+parser.add_argument('--l1_coef', type=float, required=False, default=1e-5, help='l1 coef')
 # wandb config
 parser.add_argument('--log_to_wandb', action='store_true', help='log to wandb')
 parser.add_argument('--wandb_project', type=str, required=False, default='pythia-160m-lorsa', help='wandb project')
@@ -59,8 +59,8 @@ parser.add_argument('--use_z_relu', action='store_true', help='use relu on z')
 args = parser.parse_args()
 
 def main():
-    if args.mode == "l2":
-        project_name = f'L{args.layer}A-d{args.d_qk_head}&{args.d_ov_head}-n{args.n_qk_heads}&{args.n_ov_heads}-ctx{args.n_ctx}-lr{args.lr}-l2coef{args.l2_coef}'
+    if args.mode == "l1":
+        project_name = f'L{args.layer}A-d{args.d_qk_head}&{args.d_ov_head}-n{args.n_qk_heads}&{args.n_ov_heads}-ctx{args.n_ctx}-lr{args.lr}-l1coef{args.l1_coef}'
     elif args.mode == "top_k":
         project_name = f'L{args.layer}A-d{args.d_qk_head}&{args.d_ov_head}-n{args.n_qk_heads}&{args.n_ov_heads}-ctx{args.n_ctx}-lr{args.lr}-k{args.top_k}'
     elif args.mode == "default":
@@ -100,8 +100,8 @@ def main():
         end_k = args.top_k,
         k_warm_up_tokens = args.k_warm_up_tokens,
         
-        # l2 config
-        l2_coef=args.l2_coef,
+        # l1 config
+        l1_coef=args.l1_coef,
 
         # wandb config
         log_to_wandb = args.log_to_wandb,

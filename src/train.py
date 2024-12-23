@@ -75,10 +75,10 @@ def train_lorsa(lorsa: LowRankSparseAttention, model: HookedTransformer, cfg: Lo
             out, top_k_z = lorsa.forward_top_k(hook_in)
             mse_loss = F.mse_loss(out[filter_mask], hook_out[filter_mask])
             loss = mse_loss
-        elif cfg.mode == "l2":
-            out, l2 = lorsa.forward_l2(hook_in)
+        elif cfg.mode == "l1":
+            out, l1 = lorsa.forward_l1(hook_in)
             mse_loss = F.mse_loss(out[filter_mask], hook_out[filter_mask])
-            loss = mse_loss + cfg.l2_coef * l2[filter_mask].sum(dim=-1).mean()
+            loss = mse_loss + cfg.l1_coef * l1[filter_mask].sum(dim=-1).mean()
         elif cfg.mode == "default":
             out = lorsa.forward(hook_in)
             mse_loss = F.mse_loss(out[filter_mask], hook_out[filter_mask])
@@ -122,7 +122,7 @@ def train_lorsa(lorsa: LowRankSparseAttention, model: HookedTransformer, cfg: Lo
             log_dict = {"details/sampled_tokens": sampled_tokens,
                         "details/learning_rate": lr_scheduler.get_lr(),
                         "loss/mse_loss": mse_loss.item(), 
-                        **({"loss/l2_loss": l2.sum(dim=-1).mean().item()} if cfg.mode == "l2" else {}),
+                        **({"loss/l1_loss": l1.sum(dim=-1).mean().item()} if cfg.mode == "l1" else {}),
                         "metrics/explained_variance": explained_variance.mean().item() ,
                         "metrics/ground_truth_norm": torch.mean(torch.norm(hook_out[filter_mask], p=2, dim=-1)).item(),
                         "metrics/reconstructed_norm": torch.mean(torch.norm(out[filter_mask], p=2, dim=-1)).item(),
@@ -132,7 +132,7 @@ def train_lorsa(lorsa: LowRankSparseAttention, model: HookedTransformer, cfg: Lo
                         **({"sparsity/below 1e-5": (head_use_count / tokens_count < 1e-5).sum().item()} if cfg.mode == "top_k" and tokens_count > 1e5 else {}),
                         **({"sparsity/below 1e-6": (head_use_count / tokens_count < 1e-6).sum().item()} if cfg.mode == "top_k" and tokens_count > 1e6 else {}),
                         **({"sparsity/top_k": lorsa.cfg.top_k} if cfg.mode == "top_k" else {}),
-                        **({"metrics/l2": l2.sum(dim=-1).mean().item()} if cfg.mode == "l2" else {}),
+                        **({"metrics/l1": l1.sum(dim=-1).mean().item()} if cfg.mode == "l1" else {}),
                         }
             wandb.log(log_dict,
                       step=step)
