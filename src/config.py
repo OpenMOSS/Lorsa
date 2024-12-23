@@ -1,11 +1,15 @@
 from typing import Any, Dict, List, Optional, Tuple, Literal
-from dataclasses import dataclass
+from dataclasses import dataclass, field, fields
 
 import os
-
+import json
 import torch
 
 from transformer_lens import HookedTransformerConfig
+from utils.misc import (
+    convert_str_to_torch_dtype,
+    convert_torch_dtype_to_str,
+)
 
 @dataclass(kw_only=True)
 class LorsaConfig:
@@ -40,6 +44,21 @@ class LorsaConfig:
         self.positional_embedding_type = model_cfg.positional_embedding_type
         self.rotary_base = model_cfg.rotary_base
         self.rotary_adjacent_pairs = model_cfg.rotary_adjacent_pairs
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {field.name: getattr(self, field.name) for field in fields(self)}
+    
+    def save_config(self, save_path: str):
+        assert os.path.isdir(save_path), f"{save_path} must be a directory."
+        d = self.to_dict()
+
+        for k, v in d.items():
+            if isinstance(v, torch.dtype):
+                d[k] = convert_torch_dtype_to_str(v)
+
+        with open(os.path.join(save_path, "config.json"), "w") as f:
+            json.dump(d, f, indent=4)
+
         
     
     def __post_init__(self):
@@ -97,7 +116,15 @@ class LorsaTrainConfig:
     result_dir: str
     
     def __post_init__(self):
+        self.result_dir = os.path.join(
+            self.result_dir, 
+            f"{self.wandb_project}/{self.project_name}"
+        )
+        if not os.path.exists(self.result_dir):
+            os.makedirs(self.result_dir)
+
         self.lorsa_config.mode = self.mode
+        self.lorsa_config.save_config(save_path=self.result_dir)
 
 @dataclass(kw_only=True)
 class LorsaAnalyzeConfig:

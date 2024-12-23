@@ -20,11 +20,11 @@ import copy
 
 import wandb
 
-from model.attention import LowRankSparseAttention
+from models.attention import LowRankSparseAttention
 from config import LorsaConfig, LorsaTrainConfig
 from activations import MultiKeyDataset, ActivationDataset, PresaveActivationDataset
 
-from utils import LrWarmupScheduler, TopkWarmupScheduler
+from optim import LrWarmupScheduler, TopkWarmupScheduler
 
 def train_lorsa(lorsa: LowRankSparseAttention, model: HookedTransformer, cfg: LorsaTrainConfig, activation_dataset: ActivationDataset):
     hook_in, hook_out, filter_mask = activation_dataset.next(batch_size=8 * cfg.batch_size)

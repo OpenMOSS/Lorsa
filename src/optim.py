@@ -1,6 +1,6 @@
 import math
 
-from model.attention import LowRankSparseAttention
+from models.attention import LowRankSparseAttention
 
 class LrWarmupScheduler:
     def __init__(self, optimizer, base_lr, final_lr, warm_up_tokens, cool_down_tokens, total_tokens):

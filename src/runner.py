@@ -10,7 +10,7 @@ from transformer_lens import HookedTransformer
 
 from datasets import load_from_disk
 
-from model.attention import LowRankSparseAttention
+from models.attention import LowRankSparseAttention
 from config import LorsaTrainConfig, LorsaAnalyzeConfig, DataGenConfig
 from train import train_lorsa
 from activations import TextActivationDataset, PresaveActivationDataset
@@ -89,10 +89,8 @@ def train_lorsa_runner(cfg: LorsaTrainConfig):
     )
     
     # save
-    result_dir = os.path.join(cfg.result_dir, f"{cfg.wandb_project}/{cfg.project_name}")
-    if not os.path.exists(result_dir):
-        os.makedirs(result_dir)
-    torch.save(lorsa.state_dict(), os.path.join(result_dir, f"final.pth"))
+    
+    torch.save(lorsa.state_dict(), os.path.join(cfg.result_dir, f"final.pth"))
     
     # finish wandb
     if cfg.log_to_wandb:

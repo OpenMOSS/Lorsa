@@ -1,13 +1,14 @@
-WANDB_CONSOLE=off WANDB_MODE=offline python exp/train_lorsa.py \
+WANDB_CONSOLE=off WANDB_MODE=offline python examples/train_lorsa.py \
+    --model_name EleutherAI/pythia-160m \
     --model /inspire/hdd/ws-8207e9e2-e733-4eec-a475-cfa1c36480ba/embodied-multimodality/public/zfhe/models/pythia-160m \
-    -l 3 \
+    --layer 5 \
     --prepend_bos \
     --dataset_path /inspire/hdd/ws-8207e9e2-e733-4eec-a475-cfa1c36480ba/embodied-multimodality/public/zfhe/jx_projects/Lorsa/training_data/Slimpajama_B512_L256 \
     --dataset_type activation \
     --num_workers 4 \
     --lm_batch_size 256 \
     --buffer_size 4096 \
-    -b 32 \
+    --batch_size 32 \
     --total_tokens 800_000_000 \
     --lr 2e-3 \
     --final_lr 2e-5 \

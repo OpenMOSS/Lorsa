@@ -8,10 +8,11 @@ import torch.multiprocessing as mp
 mp.set_start_method('spawn', force=True)
 
 from config import LorsaTrainConfig, LorsaConfig
-from runner import train_lorsa_runner, train_lorsa_without_forward_runner
+from runner import train_lorsa_runner
 
 parser = argparse.ArgumentParser(description='Process hyparameters')
 # orig attn config
+parser.add_argument('--model_name', type=str, required=True, default="EleutherAI/pythia-160m", help='model name or model path')
 parser.add_argument('-m', '--model', type=str, required=False, default="EleutherAI/pythia-160m", help='model name or model path')
 parser.add_argument('-l', '--layer', type=int, required=False, default=3, help='Layer number')
 parser.add_argument('--prepend_bos', action='store_true', help="Use prepend bos or not")
@@ -58,9 +59,20 @@ parser.add_argument('--use_z_relu', action='store_true', help='use relu on z')
 args = parser.parse_args()
 
 def main():
+    if args.mode == "l2":
+        project_name = f'L{args.layer}A-d{args.d_qk_head}&{args.d_ov_head}-n{args.n_qk_heads}&{args.n_ov_heads}-ctx{args.n_ctx}-lr{args.lr}-l2coef{args.l2_coef}'
+    elif args.mode == "top_k":
+        project_name = f'L{args.layer}A-d{args.d_qk_head}&{args.d_ov_head}-n{args.n_qk_heads}&{args.n_ov_heads}-ctx{args.n_ctx}-lr{args.lr}-k{args.top_k}'
+    elif args.mode == "default":
+        project_name = f'L{args.layer}A-d{args.d_qk_head}&{args.d_ov_head}-n{args.n_qk_heads}&{args.n_ov_heads}-ctx{args.n_ctx}-lr{args.lr}'
+
+    if args.use_z_relu:
+        project_name += '-relu'
+
     cfg = LorsaTrainConfig(
         # orig attention head config
-        model_name = args.model,
+        model_name = args.model_name,
+        model = args.model,
         layer = args.layer,
         prepend_bos = args.prepend_bos,
 
@@ -96,6 +108,7 @@ def main():
         log_frequency = 100,
         wandb_project = args.wandb_project,
         wandb_entity = args.wandb_entity,
+        project_name=project_name,
         
         # result config
         result_dir = args.result_dir,
@@ -116,16 +129,6 @@ def main():
             dtype = torch.float32,
         ),
     )
-
-    if cfg.mode == "l2":
-        cfg.project_name = f'L{cfg.layer}A-d{cfg.lorsa_config.d_qk_head}&{cfg.lorsa_config.d_ov_head}-n{cfg.lorsa_config.n_qk_heads}&{cfg.lorsa_config.n_ov_heads}-ctx{cfg.lorsa_config.n_ctx}-lr{cfg.learning_rate}-l2coef{cfg.l2_coef}'
-    elif cfg.mode == "top_k":
-        cfg.project_name = f'L{cfg.layer}A-d{cfg.lorsa_config.d_qk_head}&{cfg.lorsa_config.d_ov_head}-n{cfg.lorsa_config.n_qk_heads}&{cfg.lorsa_config.n_ov_heads}-ctx{cfg.lorsa_config.n_ctx}-lr{cfg.learning_rate}-k{cfg.end_k}'
-    elif cfg.mode == "default":
-        cfg.project_name = f'L{cfg.layer}A-d{cfg.lorsa_config.d_qk_head}&{cfg.lorsa_config.d_ov_head}-n{cfg.lorsa_config.n_qk_heads}&{cfg.lorsa_config.n_ov_heads}-ctx{cfg.lorsa_config.n_ctx}-lr{cfg.learning_rate}'
-
-    if cfg.lorsa_config.use_z_relu:
-        cfg.project_name += '-relu'
 
     train_lorsa_runner(cfg=cfg)
     
