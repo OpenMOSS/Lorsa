@@ -5,7 +5,10 @@ import os
 import json
 import torch
 
+from transformers import AutoConfig
 from transformer_lens import HookedTransformerConfig
+from transformer_lens.loading_from_pretrained import convert_hf_model_config
+
 from utils.misc import (
     convert_str_to_torch_dtype,
     convert_torch_dtype_to_str,
@@ -48,6 +51,11 @@ class LorsaConfig:
     def to_dict(self) -> Dict[str, Any]:
         return {field.name: getattr(self, field.name) for field in fields(self)}
     
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any], **kwargs):
+        d = {k: v for k, v in d.items() if k in [field.name for field in fields(cls)]}
+        return cls(**d, **kwargs)
+    
     def save_config(self, save_path: str):
         assert os.path.isdir(save_path), f"{save_path} must be a directory."
         d = self.to_dict()
@@ -58,8 +66,18 @@ class LorsaConfig:
 
         with open(os.path.join(save_path, "config.json"), "w") as f:
             json.dump(d, f, indent=4)
+    
+    @classmethod
+    def from_pretrained(cls, path: str, **kwargs):
+        """Load the LorsaConfig from a pretrained SAE name or path. Config is read from <pretrained_name_or_path>/lm_config.json.
 
-        
+        Args:
+            sae_path (str): The path to the pretrained SAE.
+            **kwargs: Additional keyword arguments to pass to the LorsaConfig constructor.
+        """
+        with open(os.path.join(path, "config.json"), "r") as f:
+            lorsa_config = json.load(f)
+        return cls.from_dict(lorsa_config, **kwargs)
     
     def __post_init__(self):
         if self.n_ov_heads % self.n_qk_heads != 0:
@@ -101,9 +119,9 @@ class LorsaTrainConfig:
     
     # orig attention head config
     model_name: str
-    model: str
+    model: str = None
     layer: int
-    prepend_bos: bool
+    prepend_bos: bool = True
     
     # wandb config
     log_to_wandb: bool
@@ -114,6 +132,18 @@ class LorsaTrainConfig:
 
     # result config
     result_dir: str
+
+    def get_model_config(self):
+        hf_config = AutoConfig.from_pretrained(
+            self.model if self.model is not None else self.model_name
+        )
+        tl_config = convert_hf_model_config(
+            model_name=self.model_name,
+            hf_config=hf_config,
+        )
+        self.lorsa_config.update_from_model_config(
+            HookedTransformerConfig.unwrap(tl_config)
+        )
     
     def __post_init__(self):
         self.result_dir = os.path.join(
@@ -124,7 +154,8 @@ class LorsaTrainConfig:
             os.makedirs(self.result_dir)
 
         self.lorsa_config.mode = self.mode
-        self.lorsa_config.save_config(save_path=self.result_dir)
+        self.get_model_config()
+        
 
 @dataclass(kw_only=True)
 class LorsaAnalyzeConfig:

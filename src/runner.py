@@ -10,7 +10,7 @@ from transformer_lens import HookedTransformer
 
 from datasets import load_from_disk
 
-from models.attention import LowRankSparseAttention
+from models.lorsa import LowRankSparseAttention
 from config import LorsaTrainConfig, LorsaAnalyzeConfig, DataGenConfig
 from train import train_lorsa
 from activations import TextActivationDataset, PresaveActivationDataset
@@ -38,14 +38,11 @@ def train_lorsa_runner(cfg: LorsaTrainConfig):
         tokenizer=tokenizer,
         device=cfg.lorsa_config.device,
         dtype=cfg.lorsa_config.dtype,
-        
     )
     model.offload_params_after(f'blocks.{cfg.layer}.hook_attn_out', torch.tensor([[0]], device=cfg.lorsa_config.device))
     model.eval()
     for param in model.parameters():
         param.requires_grad = False
-
-    cfg.lorsa_config.update_from_model_config(model.cfg)
     
     # load activation dataset
     if cfg.dataset_type == 'text':
@@ -57,9 +54,11 @@ def train_lorsa_runner(cfg: LorsaTrainConfig):
     
     cfg.lorsa_config.avg_norm = activation_dataset.cal_norm()
 
+    cfg.lorsa_config.save_config(save_path=cfg.result_dir)
+
     # orig_attn = model.blocks[cfg.layer].attn
     
-    lorsa = LowRankSparseAttention(cfg.lorsa_config).to(cfg.lorsa_config.device)
+    lorsa = LowRankSparseAttention(cfg.lorsa_config).to(cfg.lorsa_config.device, non_blocking=True)
     
     # lorsa.initialize_parameters(b_O = orig_attn.b_O.data.clone().detach().to(cfg.lorsa_config.dtype) * math.sqrt(cfg.lorsa_config.d_model) / activation_dataset.avg_norm['out'])
 

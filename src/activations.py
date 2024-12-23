@@ -14,9 +14,6 @@ from tqdm import tqdm
 from config import LorsaTrainConfig
 
 
-
-
-
 class MultiKeyDataset(torch.utils.data.Dataset):
     def __init__(self, dataset, keys: list, dtypes: list):
         self.dataset = dataset
@@ -42,8 +39,8 @@ class ActivationDataset():
     @torch.no_grad()
     def cal_norm(self):
         hook_in, hook_out, filter_mask = self.next(batch_size = 8 * self.cfg.batch_size)
-        hook_in_norm = hook_in[filter_mask].norm(p=2, dim=1).mean()
-        hook_out_norm = hook_out[filter_mask].norm(p=2, dim=1).mean()
+        hook_in_norm = hook_in[filter_mask].norm(p=2, dim=1).mean().item()
+        hook_out_norm = hook_out[filter_mask].norm(p=2, dim=1).mean().item()
         print(f"Average input activation norm: {hook_in_norm}\nAverage output activation norm: {hook_out_norm}")
         return {
             "in": hook_in_norm,

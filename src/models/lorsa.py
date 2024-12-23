@@ -491,3 +491,18 @@ class LowRankSparseAttention(nn.Module):
         hook_in = hook_in * math.sqrt(self.cfg.d_model) / self.cfg.avg_norm['in']
         hook_out = hook_out * math.sqrt(self.cfg.d_model) / self.cfg.avg_norm['out']
         return hook_in, hook_out
+    
+    @classmethod
+    def from_pretrained(cls, path: str):
+        cfg = LorsaConfig.from_pretrained(path=path)
+        lorsa = cls(cfg)
+
+        state_dict_path = os.path.join(path, 'final.pth')
+        state_dict = torch.load(
+            state_dict_path, 
+            weights_only=True, 
+            map_location=cfg.device
+        )
+
+        lorsa.load_state_dict(state_dict)
+        return lorsa

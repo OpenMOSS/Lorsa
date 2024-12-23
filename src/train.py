@@ -20,7 +20,7 @@ import copy
 
 import wandb
 
-from models.attention import LowRankSparseAttention
+from models.lorsa import LowRankSparseAttention
 from config import LorsaConfig, LorsaTrainConfig
 from activations import MultiKeyDataset, ActivationDataset, PresaveActivationDataset
 
