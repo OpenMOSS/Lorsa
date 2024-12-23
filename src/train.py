@@ -44,7 +44,7 @@ def train_lorsa(lorsa: LowRankSparseAttention, model: HookedTransformer, cfg: Lo
             hook_in, hook_out, filter_mask = activation_dataset.next(batch_size=cfg.batch_size)
             hook_in, hook_out = lorsa.scale_norm(hook_in, hook_out)
             if cfg.mode == "top_k":
-                out, _ = lorsa.forward_top_k(hook_in)
+                out, _, _ = lorsa.forward_top_k(hook_in)
             elif cfg.mode == "l1":
                 out, _ = lorsa.forward_l1(hook_in)
             elif cfg.mode == "default":
@@ -72,7 +72,7 @@ def train_lorsa(lorsa: LowRankSparseAttention, model: HookedTransformer, cfg: Lo
         hook_in, hook_out, filter_mask = activation_dataset.next(batch_size=cfg.batch_size)
         hook_in, hook_out = lorsa.scale_norm(hook_in, hook_out)
         if cfg.mode == "top_k":
-            out, top_k_z = lorsa.forward_top_k(hook_in)
+            out, top_k_z, l1 = lorsa.forward_top_k(hook_in)
             mse_loss = F.mse_loss(out[filter_mask], hook_out[filter_mask])
             loss = mse_loss
         elif cfg.mode == "l1":
@@ -117,7 +117,11 @@ def train_lorsa(lorsa: LowRankSparseAttention, model: HookedTransformer, cfg: Lo
 
         # update tqdm bar
         pbar.update(filter_mask.sum().item()) 
-        pbar.set_postfix({"mse_loss": mse_loss.item(), "ev": round(explained_variance.mean().item(), 2), 'k': lorsa.cfg.top_k})
+        pbar.set_postfix({
+            "mse_loss": mse_loss.item(), 
+            "ev": round(explained_variance.mean().item(), 2), 
+            **({'k': lorsa.cfg.top_k} if cfg.mode == 'top_k' else {}),
+            **({"l1": l1[filter_mask].sum(dim=-1).mean().item()} if cfg.mode == "top_k" or cfg.mode == "l1" else {})})
         pbar.refresh()
         
         # log to wandb
@@ -135,7 +139,7 @@ def train_lorsa(lorsa: LowRankSparseAttention, model: HookedTransformer, cfg: Lo
                         **({"sparsity/below 1e-5": (head_use_count / tokens_count < 1e-5).sum().item()} if cfg.mode == "top_k" and tokens_count > 1e5 else {}),
                         **({"sparsity/below 1e-6": (head_use_count / tokens_count < 1e-6).sum().item()} if cfg.mode == "top_k" and tokens_count > 1e6 else {}),
                         **({"sparsity/top_k": lorsa.cfg.top_k} if cfg.mode == "top_k" else {}),
-                        **({"metrics/l1": l1.sum(dim=-1).mean().item()} if cfg.mode == "l1" else {}),
+                        **({"metrics/l1": l1[filter_mask].sum(dim=-1).mean().item()} if cfg.mode == "top_k" or cfg.mode == "l1" else {}),
                         }
             wandb.log(log_dict,
                       step=step)

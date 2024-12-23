@@ -97,6 +97,7 @@ class LorsaTrainConfig:
     dataset_path: str
     dataset_type: Literal["text", "activation"]
     num_workers: int
+    prefetch_factor: int
     lm_batch_size: int
     buffer_size: int
     

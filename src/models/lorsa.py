@@ -321,26 +321,46 @@ class LowRankSparseAttention(nn.Module):
         z = self.cal_z_with_h(v, pattern)
 
         with torch.no_grad():
-            # abs_z: (batch_size, query_pos, n_heads)
+            # l1: (batch_size, query_pos, n_heads)
             if self.cfg.use_z_relu:
-                abs_z = F.relu(z.squeeze(-1)) * torch.norm(self.W_O, p=2, dim=2).view(1, 1, self.cfg.n_ov_heads)
+                l1 = F.relu(z.squeeze(-1)) * torch.norm(self.W_O, p=2, dim=2).view(1, 1, self.cfg.n_ov_heads)
             else:
-                abs_z = torch.abs(z.squeeze(-1)) * torch.norm(self.W_O, p=2, dim=2).view(1, 1, self.cfg.n_ov_heads)
+                l1 = torch.abs(z.squeeze(-1)) * torch.norm(self.W_O, p=2, dim=2).view(1, 1, self.cfg.n_ov_heads)
             
             k_smallest = self.cfg.n_ov_heads - self.cfg.top_k + 1
 
             # top_k_values: (batch_size, query_pos)
-            top_k_values, _ = torch.kthvalue(abs_z, k=k_smallest, dim=2)
+            top_k_values, _ = torch.kthvalue(l1, k=k_smallest, dim=2)
             
             # top_k_mask: (batch_size, query_pos, n_heads)
-            top_k_mask = abs_z >= top_k_values.unsqueeze(-1)
+            top_k_mask = l1 >= top_k_values.unsqueeze(-1)
 
         top_k_z = z * top_k_mask.unsqueeze(-1)
 
         # out: (batch_size, query_pos, d_model)
         out = torch.einsum("bqhd,hdm->bqm", top_k_z, self.W_O)
 
-        return out, top_k_z
+        return out, top_k_z, l1 * top_k_mask
+
+    def cal_out_l1_for_ov1(self, resid: torch.Tensor):
+        # q, k, v: (batch_size, query_pos, n_heads, d_head)
+        q, k, v = self.cal_q_k_v(resid)
+
+        # pattern: (batch_size, n_heads, query_pos, key_pos)
+        pattern = self.cal_pattern(q, k)
+        
+        # z: (batch_size, query_pos, n_heads, d_head)
+        z = self.cal_z_with_h(v, pattern)
+
+        if self.cfg.use_z_relu:
+            l1 = F.relu(z.squeeze(-1)) * torch.norm(self.W_O, p=2, dim=2).view(1, 1, self.cfg.n_ov_heads)
+        else:
+            l1 = torch.abs(z.squeeze(-1)) * torch.norm(self.W_O, p=2, dim=2).view(1, 1, self.cfg.n_ov_heads)
+
+        # out: (batch_size, query_pos, d_model)
+        out = torch.einsum("bqhd,hdm->bqm", z, self.W_O)
+
+        return out, l1
 
     def forward(self, resid: torch.Tensor) -> torch.Tensor:
         out = self.cal_out(resid) # Shape: (batch_size, query_pos, d_model)
@@ -349,17 +369,20 @@ class LowRankSparseAttention(nn.Module):
     
     def forward_top_k(self, resid: torch.Tensor) -> torch.Tensor:
         if self.cfg.d_ov_head == 1:
-            out, top_k_z = self.cal_out_top_k_for_ov1(resid) # Shape: (batch_size, query_pos, d_model) (batch_size, seq_len, n_heads, d_head)
+            out, top_k_z, l1 = self.cal_out_top_k_for_ov1(resid) # Shape: (batch_size, query_pos, d_model) (batch_size, seq_len, n_heads, d_head)
         else:
             raise NotImplementedError('Not implemented yet')
             # out, top_k_z = self.cal_out_top_k(resid) # Shape: (batch_size, query_pos, d_model) (batch_size, seq_len, top_k)
         out = out + self.b_O
-        return out, top_k_z # Shape: (batch_size, query_pos, d_model) (batch_size, seq_len, n_heads, d_head)
+        return out, top_k_z, l1 # Shape: (batch_size, query_pos, d_model), (batch_size, seq_len, n_heads, d_head), (batch_size, seq_len, n_heads)
     
     def forward_l1(self, resid: torch.Tensor) -> torch.Tensor:
-        out = self.cal_out_with_h(resid)
-        l1 = torch.linalg.vector_norm(out, dim=-1) # batch_size, seq_len, n_heads
-        out = out.sum(dim=2) + self.b_O
+        if self.cfg.d_ov_head == 1:
+            out, l1 = self.cal_out_l1_for_ov1(resid)
+        else:
+            raise NotImplementedError('Not implemented yet')
+            # out = self.cal_out_with_h(resid)
+        out = out + self.b_O
         return out, l1
     
     def forward_with_k(self, resid: torch.Tensor)-> torch.Tensor:

@@ -171,7 +171,7 @@ class PresaveActivationDataset(ActivationDataset):
             batch_size=1,
             shuffle=False,
             num_workers=cfg.num_workers,
-            prefetch_factor=1,
+            prefetch_factor=cfg.prefetch_factor,
         )
         self.dataloader = dataloader
         self.data_iter = iter(dataloader)
