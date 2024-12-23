@@ -26,11 +26,14 @@ class LorsaConfig:
     virtual_kv_num: int = 0
     use_z_relu: bool = False
     n_ctx: int = 256
+    layer: int | None = None
+    model_name: str | None = None
     
     mode: Literal["default", "top_k", "l2"] = "default"
     top_k: Optional[int] = None
     
     avg_norm: dict = None
+    
     
     # config from model config
     d_model: Optional[int] = None
@@ -136,7 +139,7 @@ class LorsaTrainConfig:
     # result config
     result_dir: str
 
-    def get_model_config(self):
+    def update_lorsa_cfg_with_model_cfg(self):
         hf_config = AutoConfig.from_pretrained(
             self.model if self.model is not None else self.model_name
         )
@@ -156,8 +159,13 @@ class LorsaTrainConfig:
         if not os.path.exists(self.result_dir):
             os.makedirs(self.result_dir)
 
+
+        # pass necessary configurations to lorsa config
         self.lorsa_config.mode = self.mode
-        self.get_model_config()
+        self.lorsa_config.layer = self.layer
+        self.lorsa_config.model_name = self.model_name
+
+        self.update_lorsa_cfg_with_model_cfg()
 
 
 @dataclass(kw_only=True)
