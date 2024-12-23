@@ -77,6 +77,9 @@ class LorsaConfig:
         """
         with open(os.path.join(path, "config.json"), "r") as f:
             lorsa_config = json.load(f)
+        
+        lorsa_config['dtype'] = convert_str_to_torch_dtype(lorsa_config['dtype'])
+
         return cls.from_dict(lorsa_config, **kwargs)
     
     def __post_init__(self):
@@ -155,7 +158,7 @@ class LorsaTrainConfig:
 
         self.lorsa_config.mode = self.mode
         self.get_model_config()
-        
+
 
 @dataclass(kw_only=True)
 class LorsaAnalyzeConfig:
