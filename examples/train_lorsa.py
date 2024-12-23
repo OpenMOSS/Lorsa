@@ -22,6 +22,7 @@ parser.add_argument('--dataset_type', choices=['text', 'activation'], required=T
 parser.add_argument('--num_workers', type=int, required=False, default=32, help='Num workers, default 32')
 parser.add_argument('--lm_batch_size', type=int, required=False, default=32, help='Batchsize when forward, default 32')
 parser.add_argument('--buffer_size', type=int, required=False, default=512, help='num of batchs in buffer')
+parser.add_argument('--prefetch_factor', type=int, required=False, default=2, help='prefetch factor')
 
 # training config
 parser.add_argument('-b', '--batch_size', type=int, required=False, default=32, help='Batchsize, default 32')
@@ -60,11 +61,11 @@ args = parser.parse_args()
 
 def main():
     if args.mode == "l1":
-        project_name = f'L{args.layer}A-d{args.d_qk_head}&{args.d_ov_head}-n{args.n_qk_heads}&{args.n_ov_heads}-ctx{args.n_ctx}-lr{args.lr}-l1coef{args.l1_coef}'
+        project_name = f'L{args.layer}A-d{args.d_qk_head}&{args.d_ov_head}-n{args.n_qk_heads}&{args.n_ov_heads}-ctx{args.n_ctx}-lr{args.lr:.0e}-tokens{args.total_tokens:.0e}-l1coef{args.l1_coef}'
     elif args.mode == "top_k":
-        project_name = f'L{args.layer}A-d{args.d_qk_head}&{args.d_ov_head}-n{args.n_qk_heads}&{args.n_ov_heads}-ctx{args.n_ctx}-lr{args.lr}-k{args.top_k}'
+        project_name = f'L{args.layer}A-d{args.d_qk_head}&{args.d_ov_head}-n{args.n_qk_heads}&{args.n_ov_heads}-ctx{args.n_ctx}-lr{args.lr:.0e}-tokens{args.total_tokens:.0e}-k{args.top_k}'
     elif args.mode == "default":
-        project_name = f'L{args.layer}A-d{args.d_qk_head}&{args.d_ov_head}-n{args.n_qk_heads}&{args.n_ov_heads}-ctx{args.n_ctx}-lr{args.lr}'
+        project_name = f'L{args.layer}A-d{args.d_qk_head}&{args.d_ov_head}-n{args.n_qk_heads}&{args.n_ov_heads}-ctx{args.n_ctx}-lr{args.lr:.0e}-tokens{args.total_tokens:.0e}'
 
     if args.use_z_relu:
         project_name += '-relu'
@@ -82,6 +83,7 @@ def main():
         num_workers = args.num_workers,
         lm_batch_size = args.lm_batch_size,
         buffer_size = args.buffer_size,
+        prefetch_factor=args.prefetch_factor,
 
         # training config
         batch_size = args.batch_size,
