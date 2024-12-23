@@ -11,7 +11,6 @@ import einops
 
 from config import LorsaConfig
 
-
 class LowRankSparseAttention(nn.Module):
     def __init__(self, config: LorsaConfig):
         super(LowRankSparseAttention, self).__init__()

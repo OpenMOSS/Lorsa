@@ -96,12 +96,16 @@ class TextActivationDataset(ActivationDataset):
 
 
 class PresaveLoadingDataset(torch.utils.data.Dataset):
-    def __init__(self, file_paths, cfg):
+    def __init__(self, cfg: LorsaTrainConfig):
         """
         Initialize the dataset with file paths and configuration.
         """
-        self.file_paths = file_paths
+        self.hook_in_name = f'blocks.{cfg.layer}.ln1.hook_normalized'
+        self.hook_out_name = f'blocks.{cfg.layer}.hook_attn_out'
+        
         self.cfg = cfg
+        
+        self.file_paths = self.get_file_paths()
 
     def __len__(self):
         """
@@ -120,112 +124,78 @@ class PresaveLoadingDataset(torch.utils.data.Dataset):
         return {
             'input': input_tensor,
             'output': output_tensor,
-            'filter_mask': filter_mask
+            'filter_mask': filter_mask,
         }
+    
+    def get_file_paths(self):
+        file_paths = {
+            'input': [],
+            'output': [],
+            'filter_mask': []
+        }
+    
+        input_file_paths = []
+        input_file_dir = os.path.join(self.cfg.dataset_path, self.hook_in_name)
+        for item in os.listdir(input_file_dir):
+            item_path = os.path.join(input_file_dir, item)
+            if os.path.isfile(item_path) and item_path.endswith('.pt'):
+                input_file_paths.append(item_path)
+        input_file_paths.sort()
+        file_paths['input'] += input_file_paths
 
+        output_file_paths = []
+        output_file_dir = os.path.join(self.cfg.dataset_path, self.hook_out_name)
+        for item in os.listdir(output_file_dir):
+            item_path = os.path.join(output_file_dir, item)
+            if os.path.isfile(item_path) and item_path.endswith('.pt'):
+                output_file_paths.append(item_path)
+        output_file_paths.sort()
+        file_paths['output'] += output_file_paths
+
+        filter_mask_file_paths = []
+        filter_mask_file_dir = os.path.join(self.cfg.dataset_path, 'filter_mask')
+        for item in os.listdir(filter_mask_file_dir):
+            item_path = os.path.join(filter_mask_file_dir, item)
+            if os.path.isfile(item_path) and item_path.endswith('.pt'):
+                filter_mask_file_paths.append(item_path)
+        filter_mask_file_paths.sort()
+        file_paths['filter_mask'] += filter_mask_file_paths
+        
+        return file_paths
 
 class PresaveActivationDataset(ActivationDataset):
     def __init__(self, cfg: LorsaTrainConfig):
-        self.hook_in_name = f'blocks.{cfg.layer}.ln1.hook_normalized'
-        self.hook_out_name = f'blocks.{cfg.layer}.hook_attn_out'
+        presave_dataset = PresaveLoadingDataset(cfg)
+        dataloader = DataLoader(
+            presave_dataset,
+            batch_size=1,
+            shuffle=False,
+            num_workers=cfg.num_workers,
+            prefetch_factor=1,
+        )
+        self.dataloader = dataloader
+        self.data_iter = iter(dataloader)
         self.cfg = cfg
+        
         self.act_buffer = {
             'input': torch.empty(self.cfg.buffer_size, self.cfg.lorsa_config.n_ctx, self.cfg.lorsa_config.d_model, dtype=self.cfg.lorsa_config.dtype, device=self.cfg.lorsa_config.device),
             'output': torch.empty(self.cfg.buffer_size, self.cfg.lorsa_config.n_ctx, self.cfg.lorsa_config.d_model, dtype=self.cfg.lorsa_config.dtype, device=self.cfg.lorsa_config.device),
             'filter_mask': torch.empty(self.cfg.buffer_size, self.cfg.lorsa_config.n_ctx, dtype=torch.bool, device=self.cfg.lorsa_config.device)
         }
         self.index = 0
-        
-        
-        self.directory_list = []
-        for item in os.listdir(self.cfg.dataset_path):
-            item_path = os.path.join(self.cfg.dataset_path, item)
-            if os.path.isdir(item_path):
-                self.directory_list.append(item_path)
-        self.directory_id = 0
-                
-        self.file_paths = {
-            'input': [],
-            'output': [],
-            'filter_mask': []
-        }
-        self.file_id = 0
-        
         self.fill()
-    
-    def add_file_paths(self):
-        
-        input_file_paths = []
-        input_file_dir = os.path.join(self.directory_list[self.directory_id], self.hook_in_name)
-        for item in os.listdir(input_file_dir):
-            item_path = os.path.join(input_file_dir, item)
-            if os.path.isfile(item_path) and item_path.endswith('.pt'):
-                input_file_paths.append(item_path)
-        input_file_paths.sort()
-        self.file_paths['input'] += input_file_paths
-        
-        output_file_paths = []
-        output_file_dir = os.path.join(self.directory_list[self.directory_id], self.hook_out_name)
-        for item in os.listdir(output_file_dir):
-            item_path = os.path.join(output_file_dir, item)
-            if os.path.isfile(item_path) and item_path.endswith('.pt'):
-                output_file_paths.append(item_path)
-        output_file_paths.sort()
-        self.file_paths['output'] += output_file_paths
-        
-        filter_mask_file_paths = []
-        filter_mask_file_dir = os.path.join(self.directory_list[self.directory_id], 'filter_mask')
-        for item in os.listdir(filter_mask_file_dir):
-            item_path = os.path.join(filter_mask_file_dir, item)
-            if os.path.isfile(item_path) and item_path.endswith('.pt'):
-                filter_mask_file_paths.append(item_path)
-        filter_mask_file_paths.sort()
-        self.file_paths['filter_mask'] += filter_mask_file_paths
-    
-    def load_data(self, i, file_paths):
-        start_idx = self.index + i * self.cfg.lm_batch_size
-        end_idx = self.index + (i + 1) * self.cfg.lm_batch_size
 
-        self.act_buffer['input'][start_idx:end_idx] = torch.load(file_paths['input'][i], weights_only=True).to(self.cfg.lorsa_config.dtype).to(self.cfg.lorsa_config.device, non_blocking=True)
-        self.act_buffer['output'][start_idx:end_idx] = torch.load(file_paths['output'][i], weights_only=True).to(self.cfg.lorsa_config.dtype).to(self.cfg.lorsa_config.device, non_blocking=True)
-        self.act_buffer['filter_mask'][start_idx:end_idx] = torch.load(file_paths['filter_mask'][i], weights_only=True).to(self.cfg.lorsa_config.device, non_blocking=True)
-
-        # return {
-        #     'index': i,
-        #     'input': input_tensor,
-        #     'output': output_tensor,
-        #     'filter_mask': filter_mask
-        # }
-        
     def fill(self):
-        file_num = (self.cfg.buffer_size - self.index) // self.cfg.lm_batch_size
-
-        file_paths = self.get_file_paths(file_num)
-        
-        with ThreadPoolExecutor(max_workers=None) as executor:
-            futures = [
-                executor.submit(self.load_data, i, file_paths)
-                for i in range(file_num)
-            ]
-
-            # for future in futures:
-            #     result = future.result()
-      
-        self.index += file_num * self.cfg.lm_batch_size
-
-    def get_file_paths(self, file_num: int):
-        while len(self.file_paths['input']) - self.file_id < file_num:
-            if self.directory_id < len(self.directory_list):
-                self.add_file_paths()
-                self.directory_id += 1
-            else:
-                raise ValueError("No more files to load")
-        
-        file_paths = {
-            'input': self.file_paths['input'][self.file_id:self.file_id+file_num],
-            'output': self.file_paths['output'][self.file_id:self.file_id+file_num],
-            'filter_mask': self.file_paths['filter_mask'][self.file_id:self.file_id+file_num]
-        }
-        self.file_id += file_num
-        
-        return file_paths
+        while self.cfg.buffer_size - self.index >= self.cfg.lm_batch_size:
+            try:
+                batch = next(self.data_iter)
+            except StopIteration:
+                self.data_iter = iter(self.dataloader)
+                batch = next(self.data_iter)
+            input_tensor = batch['input'].to(self.cfg.lorsa_config.dtype).to(self.cfg.lorsa_config.device)
+            output_tensor = batch['output'].to(self.cfg.lorsa_config.dtype).to(self.cfg.lorsa_config.device)
+            filter_mask = batch['filter_mask'].to(self.cfg.lorsa_config.device)
+            self.act_buffer['input'][self.index:self.index+self.cfg.lm_batch_size] = input_tensor
+            self.act_buffer['output'][self.index:self.index+self.cfg.lm_batch_size] = output_tensor
+            self.act_buffer['filter_mask'][self.index:self.index+self.cfg.lm_batch_size] = filter_mask
+            self.index += self.cfg.lm_batch_size
