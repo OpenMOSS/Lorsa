@@ -14,20 +14,28 @@ from config import DataGenConfig
 @torch.no_grad()
 def generate_train_data(cfg: DataGenConfig):
     # load model
-    hf_model = GPTNeoXForCausalLM.from_pretrained(cfg.model_name, torch_dtype=cfg.dtype)
-    hf_tokenizer = GPTNeoXTokenizerFast.from_pretrained(cfg.model_name)
+    hf_model = GPTNeoXForCausalLM.from_pretrained(
+        cfg.model, 
+        local_files_only=True
+    )
+    tokenizer = GPTNeoXTokenizerFast.from_pretrained(
+        cfg.model, 
+        local_files_only=True
+    )
+
     model = HookedTransformer.from_pretrained_no_processing(
-            cfg.model_name,
-            use_flash_attn=cfg.use_flash_attn,
-            device=cfg.device,
-            hf_model=hf_model,
-            tokenizer=hf_tokenizer,
-            dtype=cfg.dtype,
+        cfg.model_name, 
+        use_flash_attn=True, 
+        hf_model=hf_model,
+        hf_config=hf_model.config,
+        tokenizer=tokenizer,
+        device=cfg.device,
+        dtype=cfg.dtype,
     )
     # load dataset
     dataset = load_from_disk(cfg.dataset_path)
     filtered_dataset = dataset.filter(
-        lambda example: len(hf_tokenizer.encode(example['text'])) >= cfg.n_ctx,
+        lambda example: len(tokenizer.encode(example['text'])) >= cfg.n_ctx,
         num_proc = cfg.num_proc,
     )
     # create DataLoader
