@@ -180,7 +180,10 @@ class LowRankSparseAttention(nn.Module):
             v, "batch key_pos head_index d_head -> batch head_index key_pos d_head"
         ) # Shape: (batch_size, n_ov_heads, key_pos, d_head)
         
-        pattern_ = pattern.repeat_interleave(int(self.cfg.n_ov_heads / self.cfg.n_qk_heads), dim=1) # Shape: (batch_size, n_ov_heads, query_pos, key_pos)
+        pattern_ = pattern.repeat_interleave(
+            self.cfg.n_ov_heads // self.cfg.n_qk_heads, 
+            dim=1,
+        ) # Shape: (batch_size, n_ov_heads, query_pos, key_pos)
         
         z = pattern_[:, :, :, :, None] * v_[:, :, None, :, :] # Shape: (batch_size, n_heads, query_pos, key_pos, d_head)
 
@@ -197,7 +200,10 @@ class LowRankSparseAttention(nn.Module):
             v, "batch key_pos head_index d_head -> batch head_index key_pos d_head"
         ) # Shape: (batch_size, n_ov_heads, key_pos, d_head)
         
-        pattern_ = pattern.repeat_interleave(int(self.cfg.n_ov_heads / self.cfg.n_qk_heads), dim=1) # Shape: (batch_size, n_ov_heads, query_pos, key_pos)
+        pattern_ = pattern.repeat_interleave(
+            self.cfg.n_ov_heads // self.cfg.n_qk_heads, 
+            dim=1,
+        ) # Shape: (batch_size, n_ov_heads, query_pos, key_pos)
         
         z = torch.matmul(pattern_, v_)  # Shape: (batch_size, n_heads, query_pos, d_head)
 
@@ -208,7 +214,7 @@ class LowRankSparseAttention(nn.Module):
         
         return z
     
-    def decode_z_with_W_O(z):
+    def decode_z_with_W_O(self, z):
         # There may be some accuracy differences compared to using F.linear to operate directly with W_O and b_O  
         return torch.einsum("bqhd,hdm->bqm", z, self.W_O)  # Shape: (batch_size, query_pos, d_model)
     
@@ -339,9 +345,9 @@ class LowRankSparseAttention(nn.Module):
         top_k_z = z * top_k_mask.unsqueeze(-1)
 
         # out: (batch_size, query_pos, d_model)
-        out = torch.einsum("bqhd,hdm->bqm", top_k_z, self.W_O)
+        out = self.decode_z_with_W_O(top_k_z)
 
-        return out, top_k_z
+        return out, top_k_z.squeeze(-1)
 
     def cal_out_top_k_for_ov1_flash_attn(self, resid: torch.Tensor):
         # q, k, v: (batch_size, query_pos, n_heads, d_head)
@@ -488,15 +494,25 @@ class LowRankSparseAttention(nn.Module):
         self, 
         hook_in: Float[torch.Tensor, "batch seq_len d_model"], 
         hook_out: Float[torch.Tensor, "batch seq_len d_model"]
-        ):
+    ):
         hook_in = hook_in * math.sqrt(self.cfg.d_model) / self.cfg.avg_norm['in']
         hook_out = hook_out * math.sqrt(self.cfg.d_model) / self.cfg.avg_norm['out']
         return hook_in, hook_out
+    
+    @torch.no_grad()
+    def fold_W_O_into_W_V(self):
+        O_norm = torch.norm(self.W_O, p=2, dim=2)  # n_ov_head d_ov_head
+        self.W_O /= O_norm[:, :, None]
+        self.W_V *= O_norm[:, None, :]
+        self.b_V *= O_norm
+
+        return self
     
     @classmethod
     def from_pretrained(cls, path: str):
         cfg = LorsaConfig.from_pretrained(path=path)
         lorsa = cls(cfg)
+        lorsa.to(cfg.device, non_blocking=True)
 
         state_dict_path = os.path.join(path, 'final.pth')
         state_dict = torch.load(
