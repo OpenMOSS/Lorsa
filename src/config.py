@@ -29,7 +29,7 @@ class LorsaConfig:
     layer: int | None = None
     model_name: str | None = None
     
-    mode: Literal["default", "top_k", "l2"] = "default"
+    mode: Literal["default", "top_k", "l1"] = "default"
     top_k: Optional[int] = None
     
     avg_norm: dict = None
@@ -100,6 +100,7 @@ class LorsaTrainConfig:
     dataset_path: str
     dataset_type: Literal["text", "activation"]
     num_workers: int
+    prefetch_factor: int
     lm_batch_size: int
     buffer_size: int
     
@@ -111,7 +112,7 @@ class LorsaTrainConfig:
     lr_warm_up_tokens: int
     lr_cool_down_tokens: int
     clip_grad_norm: float
-    mode: Literal["default", "top_k", "l2"] = "default"
+    mode: Literal["default", "top_k", "l1"] = "default"
     init_scale_parameters: bool = True
     
     # k config
@@ -120,8 +121,8 @@ class LorsaTrainConfig:
     end_k: Optional[int] = None
     k_warm_up_tokens: Optional[int] = None
     
-    # l2 config
-    l2_coef: Optional[float] = None
+    # l1 config
+    l1_coef: Optional[float] = None
     
     # orig attention head config
     model_name: str

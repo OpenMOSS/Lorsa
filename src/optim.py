@@ -69,5 +69,5 @@ class TopkWarmupScheduler:
 
         self.lorsa.cfg.top_k = int(k)
             
-    def get_lr(self):
+    def get_k(self):
         return self.lorsa.cfg.top_k
