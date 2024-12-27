@@ -1,6 +1,5 @@
 import { Head, Sample, Token } from "@/types/head";
 import { SuperToken } from "./token";
-import { mergeUint8Arrays } from "@/utils/array";
 import { useState } from "react";
 import { AppPagination } from "../ui/pagination";
 import { Accordion, AccordionTrigger, AccordionContent, AccordionItem } from "../ui/accordion";
