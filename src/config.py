@@ -204,6 +204,7 @@ class DataGenConfig:
     
     # model config
     model_name: str
+    model: str
     use_flash_attn: bool
 
     # data config
