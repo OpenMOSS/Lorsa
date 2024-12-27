@@ -3,6 +3,7 @@ exp/
 PySvelte/
 result/
 .vscode/
+*.env
 *.pyc
 __pycache__/
 Language-Model-SAEs/

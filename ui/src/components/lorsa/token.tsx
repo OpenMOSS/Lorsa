@@ -13,15 +13,10 @@ export type TokenInfoProps = {
 };
 
 export const TokenInfo = ({ token, maxHeadAct, position }: TokenInfoProps) => {
-  const hex = token.token.reduce(
-    (acc, b) => (b < 32 || b > 126 ? `${acc}\\x${b.toString(16).padStart(2, "0")}` : `${acc}${String.fromCharCode(b)}`),
-    ""
-  );
-
   return (
     <div className="grid grid-cols-2 gap-2">
       <div className="text-sm font-bold">Token:</div>
-      <div className="text-sm underline whitespace-pre-wrap">{hex}</div>
+      <div className="text-sm underline whitespace-pre-wrap">{token.token}</div>
       <div className="text-sm font-bold">Position:</div>
       <div className="text-sm">{position}</div>
       <div className="text-sm font-bold">Activation:</div>
@@ -41,11 +36,7 @@ export type SuperTokenProps = {
 
 export const SuperToken = ({ tokens, position, maxHeadAct, sampleMaxHeadAct }: SuperTokenProps) => {
   const decoder = new TextDecoder("utf-8", { fatal: true });
-  const displayText = decoder
-    .decode(mergeUint8Arrays(tokens.map((t) => t.token)))
-    .replace("\n", "⏎")
-    .replace("\t", "⇥")
-    .replace("\r", "↵");
+  const displayText = tokens.map(token => token.token).join("")
 
   const superTokenMaxHeadAct = Math.max(...tokens.map((t) => t.headAct));
 

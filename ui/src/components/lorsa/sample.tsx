@@ -90,6 +90,8 @@ export const HeadActivationSample = ({ sample, sampleName, maxHeadAct }: HeadAct
     [[], []]
   );
 
+  // console.log(tokenGroupsTrigger)
+
   const tokenGroupPositionsTrigger = tokenGroupsTrigger.reduce<number[]>(
     (acc, tokenGroup) => {
       const tokenCount = tokenGroup.length;
