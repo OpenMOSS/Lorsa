@@ -173,7 +173,14 @@ class LowRankSparseAttention(nn.Module):
         
         return pattern # Shape: (batch_size, n_qk_heads, query_pos, key_pos)
     
-    def cal_z_with_k_h(self, v: torch.Tensor, pattern: torch.Tensor) -> torch.Tensor:
+    def cal_per_key_position_z_with_h(
+        self, 
+        v: torch.Tensor, 
+        pattern: torch.Tensor,
+    ) -> Float[torch.Tensor, "batch_size query_pos key_pos n_heads d_head"]:
+        """
+        Get Z pattern of each key pos without summing, might consume a lot of memory.
+        """
         
         v_ = einops.rearrange(
             v, "batch key_pos head_index d_head -> batch head_index key_pos d_head"
@@ -193,7 +200,14 @@ class LowRankSparseAttention(nn.Module):
         
         return z
     
-    def cal_z_with_h(self, v: torch.Tensor, pattern: torch.Tensor) -> torch.Tensor:
+    def cal_z_with_h(
+        self, 
+        v: torch.Tensor, 
+        pattern: torch.Tensor
+    ) -> Float[torch.Tensor, "batch_size query_pos n_heads d_head"]:
+        """
+        Get Z pattern (summing over key positions).
+        """
         
         v_ = einops.rearrange(
             v, "batch key_pos head_index d_head -> batch head_index key_pos d_head"
@@ -213,6 +227,13 @@ class LowRankSparseAttention(nn.Module):
         
         return z
     
+    def cal_q_k_v_pattern(self, resid):
+        q, k, v = self.cal_q_k_v(resid) # Shape: (batch_size, query_pos, n_heads, d_head)
+        
+        pattern = self.cal_pattern(q, k) # Shape: (batch_size, n_heads, query_pos, key_pos)
+
+        return q, k, v, pattern
+    
     def decode_z_with_W_O(self, z):
         # There may be some accuracy differences compared to using F.linear to operate directly with W_O and b_O  
         return torch.einsum("bqhd,hdm->bqm", z, self.W_O)  # Shape: (batch_size, query_pos, d_model)
@@ -223,40 +244,34 @@ class LowRankSparseAttention(nn.Module):
         Calculate the output of each query position without b_O 
         '''
         
-        q, k, v = self.cal_q_k_v(resid) # Shape: (batch_size, query_pos, n_heads, d_head)
-        
-        pattern = self.cal_pattern(q, k) # Shape: (batch_size, n_heads, query_pos, key_pos)
-        
+        q, k, v, pattern = self.cal_q_k_v_pattern(resid)
+                
         z = self.cal_z_with_h(v, pattern) # Shape: (batch_size, query_pos, n_heads, d_head)
 
         return self.decode_z_with_W_O(z)
     
-    def cal_out_with_k(self, resid: torch.Tensor) -> torch.Tensor:
+    def cal_out_from_per_key_position(self, resid: torch.Tensor) -> torch.Tensor:
         
         '''
         Calculate the output of each query position and each key position, without b_O 
         '''
         
-        q, k, v = self.cal_q_k_v(resid) # Shape: (batch_size, query_pos, n_heads, d_head)
+        q, k, v, pattern = self.cal_q_k_v_pattern(resid)
         
-        pattern = self.cal_pattern(q, k) # Shape: (batch_size, n_heads, query_pos, key_pos)
-        
-        z = self.cal_z_with_k_h(v, pattern) # Shape: (batch_size, query_pos, key_pos, n_heads, d_head)
+        z = self.cal_per_key_position_z_with_h(v, pattern) # Shape: (batch_size, query_pos, key_pos, n_heads, d_head)
                 
         return self.decode_z_with_W_O(z)
         
     
-    def cal_out_with_k_h(self, resid: torch.Tensor) -> torch.Tensor:
+    def cal_out_from_per_key_position_h(self, resid: torch.Tensor) -> torch.Tensor:
         
         '''
         Calculate the output of each head, each query position, each key position, without b_O 
         '''
         
-        q, k, v = self.cal_q_k_v(resid) # Shape: (batch_size, query_pos, n_heads, d_head)
+        q, k, v, pattern = self.cal_q_k_v_pattern(resid)
         
-        pattern = self.cal_pattern(q, k) # Shape: (batch_size, n_heads, query_pos, key_pos)
-        
-        z = self.cal_z_with_k_h(v, pattern) # Shape: (batch_size, query_pos, key_pos, n_heads, d_head)
+        z = self.cal_per_key_position_z_with_h(v, pattern) # Shape: (batch_size, query_pos, key_pos, n_heads, d_head)
 
         return self.decode_z_with_W_O(z)
     
@@ -266,9 +281,7 @@ class LowRankSparseAttention(nn.Module):
         Calculate the output of each query position and each head without b_O 
         '''
         
-        q, k, v = self.cal_q_k_v(resid) # Shape: (batch_size, query_pos, n_heads, d_head)
-        
-        pattern = self.cal_pattern(q, k) # Shape: (batch_size, n_heads, query_pos, key_pos)
+        q, k, v, pattern = self.cal_q_k_v_pattern(resid)
         
         z = self.cal_z_with_h(v, pattern) # Shape: (batch_size, query_pos, n_heads, d_head)
         
@@ -294,9 +307,7 @@ class LowRankSparseAttention(nn.Module):
         Calculate the output of heads which have top_k l1 norm, without b_O
         '''
         
-        q, k, v = self.cal_q_k_v(resid) # Shape: (batch_size, query_pos, n_heads, d_head)
-        
-        pattern = self.cal_pattern(q, k) # Shape: (batch_size, n_heads, query_pos, key_pos)
+        q, k, v, pattern = self.cal_q_k_v_pattern(resid)
         
         z = self.cal_z_with_h(v, pattern) # Shape: (batch_size, query_pos, n_heads, d_head)
         
@@ -317,11 +328,7 @@ class LowRankSparseAttention(nn.Module):
         return top_k_out, top_k_indices
     
     def cal_out_top_k_for_ov1(self, resid: torch.Tensor):
-        # q, k, v: (batch_size, query_pos, n_heads, d_head)
-        q, k, v = self.cal_q_k_v(resid)
-
-        # pattern: (batch_size, n_heads, query_pos, key_pos)
-        pattern = self.cal_pattern(q, k)
+        q, k, v, pattern = self.cal_q_k_v_pattern(resid)
         
         # z: (batch_size, query_pos, n_heads, d_head)
         z = self.cal_z_with_h(v, pattern)
@@ -349,11 +356,7 @@ class LowRankSparseAttention(nn.Module):
         return out, top_k_z.squeeze(-1), l1 * top_k_mask
 
     def cal_out_l1_for_ov1(self, resid: torch.Tensor):
-        # q, k, v: (batch_size, query_pos, n_heads, d_head)
-        q, k, v = self.cal_q_k_v(resid)
-
-        # pattern: (batch_size, n_heads, query_pos, key_pos)
-        pattern = self.cal_pattern(q, k)
+        q, k, v, pattern = self.cal_q_k_v_pattern(resid)
         
         # z: (batch_size, query_pos, n_heads, d_head)
         z = self.cal_z_with_h(v, pattern)
@@ -502,16 +505,18 @@ class LowRankSparseAttention(nn.Module):
         return self
     
     @classmethod
-    def from_pretrained(cls, path: str):
+    def from_pretrained(cls, path: str, device: str | None = None):
         cfg = LorsaConfig.from_pretrained(path=path)
+        device = cfg.device if device is None else device
+        
         lorsa = cls(cfg)
-        lorsa.to(cfg.device, non_blocking=True)
+        lorsa.to(device, non_blocking=True)
 
         state_dict_path = os.path.join(path, 'final.pth')
         state_dict = torch.load(
             state_dict_path, 
             weights_only=True, 
-            map_location=cfg.device
+            map_location=device
         )
 
         lorsa.load_state_dict(state_dict)

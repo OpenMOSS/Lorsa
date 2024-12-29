@@ -5,7 +5,9 @@ result/
 sweep_result/
 test_result/
 .vscode/
+*.env
 *.pyc
 __pycache__/
 Language-Model-SAEs/
 training_data/
+ui/node_modules/
