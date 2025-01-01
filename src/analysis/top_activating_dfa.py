@@ -1,11 +1,11 @@
 import os
 import torch
-from typing import List, Set, Tuple, Dict
+from typing import List, Set, Tuple, Dict, Union
 from jaxtyping import Float, Int, Bool
 from models.lorsa import LowRankSparseAttention
 from transformer_lens import HookedTransformer
 from config import LorsaConfig
-from tqdm import tqdm
+from tqdm.notebook import tqdm
 from einops import rearrange, repeat
 from utils.tensor_dict import concat_dict_of_tensor, sort_dict_of_tensor
 
@@ -25,9 +25,9 @@ def get_activation_with_filter_mask(
     ignore_tokens: Set[int],
     cfg: LorsaConfig,
 ) -> Tuple[
-        Float[torch.Tensor, "batch_size ctx_length d_model"],
-        Bool[torch.Tensor, "batch_size ctx_length"]
-    ]:
+    Float[torch.Tensor, "batch_size ctx_length d_model"],
+    Bool[torch.Tensor, "batch_size ctx_length"],
+]:
     tokens = model.to_tokens(
         batch, 
         prepend_bos=True,
@@ -54,7 +54,13 @@ def get_z_of_all_heads(
     lorsa: LowRankSparseAttention,
     activation: Float[torch.Tensor, "batch_size ctx_length d_model"],
     get_dfa: bool = False,
-) -> Float[torch.Tensor, "n_heads batch_size ctx_length"]:
+) -> Union[
+    Float[torch.Tensor, "n_heads batch_size ctx_length"],
+    Tuple[
+        Float[torch.Tensor, "n_heads batch_size ctx_length"], 
+        Float[torch.Tensor, "n_heads batch_size"],
+    ]
+]:
     if get_dfa:
         q, k, v, pattern = lorsa.cal_q_k_v_pattern(activation)
         z = lorsa.cal_per_key_position_z_with_h(v, pattern)  # batch_size query_pos key_pos n_heads d_head
@@ -64,8 +70,10 @@ def get_z_of_all_heads(
 
         # sum over all keys, get the max activating q pos, getting a [n_heads batch_size] index
         interested_query_pos = z.sum(dim=-1).max(dim=-1).indices  
-        interested_query_pos = interested_query_pos[:, :, None, None].expand(-1, -1, -1, z.size(3))
-        z = z.gather(dim=2, index=interested_query_pos).squeeze(2)  # DFA: n_heads batch_size key_pos
+        interested_query_pos_to_gather = interested_query_pos[:, :, None, None].expand(-1, -1, -1, z.size(3))
+        z = z.gather(dim=2, index=interested_query_pos_to_gather).squeeze(2)  # DFA: n_heads batch_size key_pos
+
+        return z, interested_query_pos
 
         # This gives us the same size as when get_dfa=False, but the meaning of the 'z's are different.
         # This branch gives the DFA of the max activating query pos while the other gives us the
@@ -76,7 +84,7 @@ def get_z_of_all_heads(
         # place n_heads dimension to the first dim for per-head analysis
         z = z.permute(2, 0, 1)
     
-    return z
+        return z
 
 def pad_tensor(tensor, dim, length):
     """
@@ -128,6 +136,12 @@ def get_dfa_of_max_activating_samples(
         device=lorsa.cfg.device,
     )
 
+    q_pos_of_max_activating_samples = torch.zeros(
+        (lorsa.cfg.n_ov_heads, get_topn_activating_samples),
+        dtype=torch.int32,
+        device=lorsa.cfg.device,
+    )
+
     interested_subset = dataset.select(interested_indexes.cpu().numpy().tolist())
 
     dataloader = torch.utils.data.DataLoader(
@@ -144,7 +158,7 @@ def get_dfa_of_max_activating_samples(
             cfg=lorsa.cfg,
         )
 
-        dfa = get_z_of_all_heads(lorsa, activation, get_dfa=True)  # n_heads 1 ctx_length
+        dfa, q_position = get_z_of_all_heads(lorsa, activation, get_dfa=True)  # n_heads 1 ctx_length ; n_heads 1
 
         interested_mask = sample_results['context_idx'] == interested_indexes[i]
         
@@ -158,7 +172,13 @@ def get_dfa_of_max_activating_samples(
             other=dfa_of_max_activating_samples,  # n_heads topn_activating_samples ctx_length
         )
 
-    return dfa_of_max_activating_samples
+        q_pos_of_max_activating_samples = torch.where(
+            condition=interested_mask,  # n_heads topn_activating_samples
+            input=q_position,
+            other=q_pos_of_max_activating_samples,  # n_heads topn_activating_samples
+        )
+
+    return dfa_of_max_activating_samples, q_pos_of_max_activating_samples
 
     
 
@@ -249,7 +269,7 @@ def sample_max_activating_sequences(
             for k, v in sample_results.items()
         }
     
-    dfa_of_max_activating_samples = get_dfa_of_max_activating_samples(
+    dfa_of_max_activating_samples, q_pos_of_max_activating_samples = get_dfa_of_max_activating_samples(
         lorsa=lorsa,
         dataset=dataset,
         model=model,
@@ -259,6 +279,7 @@ def sample_max_activating_sequences(
     )
 
     sample_results['dfa_of_max_activating_samples'] = dfa_of_max_activating_samples
+    sample_results['q_pos_of_max_activating_samples'] = q_pos_of_max_activating_samples
     sample_results['act_times'] = act_times
     
     return sample_results
