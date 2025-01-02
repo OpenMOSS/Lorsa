@@ -223,34 +223,6 @@ class LowRankSparseAttention(nn.Module):
         
         return z
     
-    '''
-    def cal_z_with_h(
-        self, 
-        v: torch.Tensor, # Shape: (batch_size, key_pos, n_ov_heads, d_head)
-        pattern: torch.Tensor # Shape: (batch_size, n_qk_heads, query_pos, key_pos)
-    ) -> Float[torch.Tensor, "batch_size query_pos n_heads d_head"]:
-        """
-        Get Z pattern (summing over key positions).
-        """
-        
-        v_ = einops.rearrange(
-            v, "batch key_pos head_index d_head -> batch head_index key_pos d_head"
-        ) # Shape: (batch_size, n_ov_heads, key_pos, d_head)
-        
-        pattern_ = pattern.repeat_interleave(
-            self.cfg.n_ov_heads // self.cfg.n_qk_heads, 
-            dim=1,
-        ) # Shape: (batch_size, n_ov_heads, query_pos, key_pos)
-        
-        z = torch.matmul(pattern_, v_)  # Shape: (batch_size, n_ov_heads, query_pos, d_head)
-
-        # Rearrange z to the desired shape
-        z = einops.rearrange(
-            z, "batch head_index query_pos d_head -> batch query_pos head_index d_head"
-        ) # shape: (batch_size, query_pos, n_ov_heads, d_head)
-        return z
-    '''
-    
     def cal_q_k_v_pattern(self, resid):
         q, k, v = self.cal_q_k_v(resid) # Shape: (batch_size, query_pos, n_heads, d_head)
         
