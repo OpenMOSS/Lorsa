@@ -202,8 +202,32 @@ class LowRankSparseAttention(nn.Module):
     
     def cal_z_with_h(
         self, 
-        v: torch.Tensor, 
-        pattern: torch.Tensor
+        v: torch.Tensor, # Shape: (batch_size, key_pos, n_ov_heads, d_head)
+        pattern: torch.Tensor # Shape: (batch_size, n_qk_heads, query_pos, key_pos)
+    ) -> Float[torch.Tensor, "batch_size query_pos n_heads d_head"]:
+        """
+        Get Z pattern (summing over key positions).
+        """
+        
+        v_ = einops.rearrange(
+            v, "batch key_pos head_index d_head -> batch head_index key_pos d_head"
+        ) # Shape: (batch_size, n_ov_heads, key_pos, d_head)
+        
+        v_reshaped = v_.view(v_.shape[0], self.cfg.n_qk_heads, self.cfg.n_ov_heads // self.cfg.n_qk_heads, v_.shape[2], v_.shape[3])
+        
+        z = torch.einsum('bnqk,bnrkh->bnrqh', pattern, v_reshaped) # Shape: (batch_size, n_qk_heads, n_ov_heads/n_qk_heads, query_pos, d_head)
+        
+        z = z.reshape(z.shape[0], z.shape[1] * z.shape[2], z.shape[3], z.shape[4]) # Shape: (batch_size, n_ov_heads, query_pos, d_head)
+        
+        z = z.permute(0, 2, 1, 3) # Shape: (batch_size, query_pos, n_ov_heads, d_head)
+        
+        return z
+    
+    '''
+    def cal_z_with_h(
+        self, 
+        v: torch.Tensor, # Shape: (batch_size, key_pos, n_ov_heads, d_head)
+        pattern: torch.Tensor # Shape: (batch_size, n_qk_heads, query_pos, key_pos)
     ) -> Float[torch.Tensor, "batch_size query_pos n_heads d_head"]:
         """
         Get Z pattern (summing over key positions).
@@ -218,14 +242,14 @@ class LowRankSparseAttention(nn.Module):
             dim=1,
         ) # Shape: (batch_size, n_ov_heads, query_pos, key_pos)
         
-        z = torch.matmul(pattern_, v_)  # Shape: (batch_size, n_heads, query_pos, d_head)
+        z = torch.matmul(pattern_, v_)  # Shape: (batch_size, n_ov_heads, query_pos, d_head)
 
         # Rearrange z to the desired shape
         z = einops.rearrange(
             z, "batch head_index query_pos d_head -> batch query_pos head_index d_head"
-        ) # shape: (batch_size, query_pos, n_heads, d_head)
-        
+        ) # shape: (batch_size, query_pos, n_ov_heads, d_head)
         return z
+    '''
     
     def cal_q_k_v_pattern(self, resid):
         q, k, v = self.cal_q_k_v(resid) # Shape: (batch_size, query_pos, n_heads, d_head)

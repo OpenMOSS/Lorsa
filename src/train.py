@@ -26,7 +26,7 @@ from activations import MultiKeyDataset, ActivationDataset, PresaveActivationDat
 
 from optim import LrWarmupScheduler, TopkWarmupScheduler
 
-def train_lorsa(lorsa: LowRankSparseAttention, model: HookedTransformer, cfg: LorsaTrainConfig, activation_dataset: ActivationDataset):
+def train_lorsa(lorsa: LowRankSparseAttention, cfg: LorsaTrainConfig, activation_dataset: ActivationDataset):
     hook_in, hook_out, filter_mask = activation_dataset.next(batch_size=8 * cfg.batch_size)
     hook_in, hook_out = lorsa.scale_norm(hook_in, hook_out)
     lorsa.initialize_parameters(b_O = hook_out[filter_mask].mean(dim=0).to(cfg.lorsa_config.dtype))
