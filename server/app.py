@@ -106,18 +106,33 @@ async def oom_error_handler(request, exc):
 def pack_text_and_dfa(
     text: List[str], 
     dfa: Float[torch.Tensor, "batch context_len"],
+    qpos: Float[torch.Tensor, "batch"],
     model: HookedTransformer,
 ):
     result = []
     assert len(text) == dfa.size(0)
     max_context_len = dfa.size(1)
-    for sentence, single_sentence_dfa in zip(text, dfa):
+    for sentence, single_sentence_dfa, single_text_qpos in zip(text, dfa, qpos):
         tokens = model.to_str_tokens(sentence)[:max_context_len]
         actual_context_len = len(tokens)
 
         single_sentence_dfa = single_sentence_dfa[:actual_context_len]
+
+        indices = (single_sentence_dfa == 0.).nonzero(as_tuple=True)[0]
+        if indices.numel() > 0:
+            q_position = indices[0].item()
+        else:
+            q_position = actual_context_len
+
+        small_value_threshold = 0.001 * single_sentence_dfa.max().item()
+        single_sentence_dfa = torch.where(
+            single_sentence_dfa < small_value_threshold,
+            0.,
+            single_sentence_dfa
+        )
+
         result.append(
-            {'context': tokens, 'head_acts': single_sentence_dfa}
+            {'context': tokens, 'head_acts': single_sentence_dfa, 'q_position': single_text_qpos.item()}
         )
 
     return result
@@ -153,9 +168,52 @@ def get_head(lorsa_name: str, head_index: str | int):
                         sample_results['context_idx'][head_index].cpu().numpy().tolist()
                     )['text'],
                     dfa=sample_results['dfa_of_max_activating_samples'][head_index],
+                    qpos=sample_results['q_pos_of_max_activating_samples'][head_index],
                     model=model,
                 ),
                 'act_times': sample_results['act_times'][head_index].item(),
+                'correlation_to_saes': {
+                    'wo_lxa': {
+                        'most_correlated_features_weight_based': {
+                            'feature_id': sample_results['wo_lxa_most_correlated_sae_features'][head_index],
+                            'decoder_cosine_similarities': sample_results['wo_lxa_most_correlated_sae_feature_cos_sims'][head_index],
+                            'wo_encoder_dfa': sample_results['wo_lxa_most_correlated_feature_dfas'][head_index],
+                        },
+                        'most_anti_correlated_features_weight_based': {
+                            'feature_id': sample_results['wo_lxa_most_anti_correlated_sae_features'][head_index],
+                            'decoder_cosine_similarities': sample_results['wo_lxa_most_anti_correlated_sae_feature_cos_sims'][head_index],
+                            'wo_encoder_dfa': sample_results['wo_lxa_most_anti_correlated_feature_dfas'][head_index],
+                        },
+                        'most_correlated_features_sample_based': {
+                            'feature_id': sample_results['sample_based_max_correlated_OVoutput_features'][head_index],
+                            'average_feature_act_given_lorsa_is_activated': sample_results['sample_based_max_correlated_OVoutput_feature_acts'][head_index],
+                        },
+                    },
+                    'wv_lxain': {
+                        'most_correlated_features_weight_based': {
+                            'feature_id': sample_results['wv_lxain_most_correlated_sae_features'][head_index],
+                            'decoder_wv_dfa': sample_results['wv_lxain_most_correlated_sae_features_dfas'][head_index],
+                        },
+                        'most_correlated_features_sample_based': {
+                            'feature_id': sample_results['sample_based_max_correlated_k_pos_features'][head_index],
+                            'average_feature_act_given_lorsa_is_activated': sample_results['sample_based_max_correlated_k_pos_feature_acts'][head_index],
+                        },
+                    },
+                    'wq_lxain': {
+                        'most_correlated_features_sample_based': {
+                            'feature_id': sample_results['sample_based_max_correlated_q_pos_features'][head_index],
+                            'average_feature_act_given_lorsa_is_activated': sample_results['sample_based_max_correlated_q_pos_feature_acts'][head_index],
+                            'fraction_of_norm_in_column_space': sample_results['wq_lxain_fraction_of_sae_dec_norms_covered_by_wq'][head_index],
+                        },
+                    },
+                    'wk_lxain': {
+                        'most_correlated_features_sample_based': {
+                            'feature_id': sample_results['sample_based_max_correlated_k_pos_features'][head_index],
+                            'average_feature_act_given_lorsa_is_activated': sample_results['sample_based_max_correlated_k_pos_feature_acts'][head_index],
+                            'fraction_of_norm_in_column_space': sample_results['wk_lxain_fraction_of_sae_dec_norms_covered_by_wk'][head_index],
+                        },
+                    },
+                },
                 "interpretation": None,
             })
         ),
@@ -199,561 +257,6 @@ def get_dictionary(dictionary_name: str):
         media_type="application/x-msgpack",
     )
 
-
-@app.post("/dictionaries/{dictionary_name}/features/{feature_index}/custom")
-def feature_activation_custom_input(dictionary_name: str, feature_index: int, input_text: str):
-    try:
-        sae = get_sae(dictionary_name)
-    except FileNotFoundError:
-        return Response(content=f"Dictionary {dictionary_name} not found", status_code=404)
-
-    if feature_index < 0 or feature_index >= sae.cfg.d_sae:
-        return Response(content=f"Feature index {feature_index} is out of range", status_code=400)
-
-    model = get_model(dictionary_name)
-    with torch.no_grad():
-        input = model.to_tokens(input_text, prepend_bos=False)
-        _, cache = model.run_with_cache_until(
-            input,
-            names_filter=[sae.cfg.hook_point_in, sae.cfg.hook_point_out],
-            until=sae.cfg.hook_point_out,
-        )
-
-        feature_acts = sae.encode(cache[sae.cfg.hook_point_in][0])
-        sample = {
-            "context": [
-                bytearray([byte_decoder[c] for c in t])
-                # Method `convert_ids_to_tokens` should exist on GPT2Tokenizer and other BPE tokenizers.
-                for t in model.tokenizer.convert_ids_to_tokens(input[0])  # type: ignore
-            ],
-            "feature_acts": feature_acts[:, feature_index].tolist(),
-        }
-
-    return Response(content=msgpack.packb(sample), media_type="application/x-msgpack")
-
-
-@app.post("/dictionaries/{dictionary_name}/custom")
-def dictionary_custom_input(dictionary_name: str, input_text: str):
-    try:
-        sae = get_sae(dictionary_name)
-    except FileNotFoundError:
-        return Response(content=f"Dictionary {dictionary_name} not found", status_code=404)
-
-    max_feature_acts = client.get_max_feature_acts(dictionary_name, dictionary_series=dictionary_series)
-    assert max_feature_acts is not None, "Max feature acts not found"
-
-    model = get_model(dictionary_name)
-
-    with torch.no_grad():
-        input = model.to_tokens(input_text, prepend_bos=False)
-        _, cache = model.run_with_cache_until(
-            input,
-            names_filter=[sae.cfg.hook_point_in, sae.cfg.hook_point_out],
-            until=sae.cfg.hook_point_out,
-        )
-
-        feature_acts = sae.encode(cache[sae.cfg.hook_point_in][0])
-        sample = {
-            "context": [
-                bytearray([byte_decoder[c] for c in t])
-                # Method `convert_ids_to_tokens` should exist on GPT2Tokenizer and other BPE tokenizers.
-                for t in model.tokenizer.convert_ids_to_tokens(input[0])  # type: ignore
-            ],
-            "feature_acts_indices": [
-                feature_acts[i].nonzero(as_tuple=True)[0].tolist() for i in range(feature_acts.shape[0])
-            ],
-            "feature_acts": [
-                feature_acts[i][feature_acts[i].nonzero(as_tuple=True)[0]].tolist()
-                for i in range(feature_acts.shape[0])
-            ],
-            "max_feature_acts": [
-                [max_feature_acts[j] for j in feature_acts[i].nonzero(as_tuple=True)[0].tolist()]
-                for i in range(feature_acts.shape[0])
-            ],
-        }
-
-    return Response(content=msgpack.packb(sample), media_type="application/x-msgpack")
-
-
-class SteeringConfig(BaseModel):
-    sae: str
-    feature_index: int
-    steering_type: Literal["times", "add", "set", "ablate"]
-    steering_value: float | None = None
-
-
-class FeatureNode(BaseModel):
-    type: Literal["feature"]
-    sae: str
-    feature_index: int
-    position: int
-
-
-class LogitsNode(BaseModel):
-    type: Literal["logits"]
-    position: int
-    token_id: int
-
-
-class AttnScoreNode(BaseModel):
-    type: Literal["attn-score"]
-    layer: int
-    head: int
-    query: int
-    key: int
-
-
-Node = Annotated[Union[FeatureNode, LogitsNode, AttnScoreNode], Field(discriminator="type")]
-
-
-class ModelGenerateRequest(BaseModel):
-    input_text: str | list[int]
-    max_new_tokens: int = 128
-    top_k: int = 50
-    top_p: float = 0.95
-    return_logits_top_k: int = 5
-    saes: list[str] = []
-    steerings: list[SteeringConfig] = []
-
-
-@app.post("/model/generate")
-def model_generate(request: ModelGenerateRequest):
-    dictionaries = client.list_dictionaries(dictionary_series=dictionary_series)
-    assert len(dictionaries) > 0, "No dictionaries found. Model name cannot be inferred."
-    model = get_model(dictionaries[0])
-    saes = [(get_sae(name), name) for name in request.saes]
-    max_feature_acts = {
-        name: client.get_max_feature_acts(name, dictionary_series=dictionary_series) for _, name in saes
-    }
-    assert all(
-        max_feature_acts is not None for max_feature_acts in max_feature_acts.values()
-    ), "Max feature acts not found"
-    max_feature_acts = cast(dict[str, dict[int, int]], max_feature_acts)
-    assert all(steering.sae in request.saes for steering in request.steerings), "Steering SAE not found"
-
-    def generate_steering_hook(steering: SteeringConfig):
-        feature_acts = None
-
-        def steer(tensor: torch.Tensor):
-            assert len(tensor.shape) == 3
-            tensor = tensor.clone()
-            if steering.steering_type == "times":
-                assert steering.steering_value is not None
-                tensor[:, :, steering.feature_index] *= steering.steering_value
-            elif steering.steering_type == "ablate":
-                tensor[:, :, steering.feature_index] = 0
-            elif steering.steering_type == "add":
-                assert steering.steering_value is not None
-                tensor[:, :, steering.feature_index] += steering.steering_value
-            elif steering.steering_type == "set":
-                assert steering.steering_value is not None
-                tensor[:, :, steering.feature_index] = steering.steering_value
-            return tensor
-
-        def save_feature_acts_hook(tensor: torch.Tensor, hook: HookPoint):
-            nonlocal feature_acts
-            feature_acts = tensor
-            return steer(tensor)
-
-        def steering_hook(tensor: torch.Tensor, hook: HookPoint):
-            assert feature_acts is not None, "Feature acts should be saved before steering"
-            difference = (steer(feature_acts) - feature_acts) @ sae.decoder.weight.T
-            tensor += difference.detach()
-            return tensor
-
-        sae = get_sae(steering.sae)
-        return [
-            (f"{sae.cfg.hook_point_out}.sae.hook_feature_acts", save_feature_acts_hook),
-            (f"{sae.cfg.hook_point_out}", steering_hook),
-        ]
-
-    steering_hooks = sum([generate_steering_hook(steering) for steering in request.steerings], [])
-
-    with torch.no_grad():
-        with apply_sae(model, [sae for sae, _ in saes]):
-            with model.hooks(steering_hooks):
-                input = (
-                    model.to_tokens(request.input_text, prepend_bos=False)
-                    if isinstance(request.input_text, str)
-                    else torch.tensor([request.input_text], device=device)
-                )
-                if request.max_new_tokens > 0:
-                    output = cast(
-                        torch.Tensor,
-                        model.generate(
-                            input,
-                            max_new_tokens=request.max_new_tokens,
-                            top_k=request.top_k,
-                            top_p=request.top_p,
-                        ),
-                    )
-                    input = output.clone()
-                name_filter = (
-                    [f"{sae.cfg.hook_point_out}.sae.hook_feature_acts" for sae, _ in saes]
-                    + [f"{sae.cfg.hook_point_out}.sae.hook_feature_acts.pre" for sae, _ in saes]
-                    + [f"{sae.cfg.hook_point_out}.sae.hook_feature_acts.post" for sae, _ in saes]
-                )
-                logits, cache = model.run_with_ref_cache(input, names_filter=name_filter)
-                logits_topk = [torch.topk(l, request.return_logits_top_k) for l in logits[0]]
-
-                result = {
-                    "context": [
-                        bytearray([byte_decoder[c] for c in t])
-                        # Method `convert_ids_to_tokens` should exist on GPT2Tokenizer and other BPE tokenizers.
-                        for t in model.tokenizer.convert_ids_to_tokens(input[0])  # type: ignore
-                    ],
-                    "token_ids": input[0].tolist(),
-                    "logits": {
-                        "logits": [l.values.tolist() for l in logits_topk],
-                        "tokens": [
-                            [
-                                bytearray([byte_decoder[c] for c in t])
-                                # Method `convert_ids_to_tokens` should exist on GPT2Tokenizer and other BPE tokenizers.
-                                for t in model.tokenizer.convert_ids_to_tokens(l.indices)  # type: ignore
-                            ]
-                            for l in logits_topk
-                        ],
-                        "token_ids": [l.indices.tolist() for l in logits_topk],
-                    },
-                    "input_mask": [1 for _ in range(len(input[0]))] + [0 for _ in range(len(input[0]) - len(input[0]))],
-                    "sae_info": [
-                        {
-                            "name": name,
-                            "feature_acts_indices": [
-                                cache[f"{sae.cfg.hook_point_out}.sae.hook_feature_acts"][0][i]
-                                .nonzero(as_tuple=True)[0]
-                                .tolist()
-                                for i in range(cache[f"{sae.cfg.hook_point_out}.sae.hook_feature_acts"][0].shape[0])
-                            ],
-                            "feature_acts": [
-                                cache[f"{sae.cfg.hook_point_out}.sae.hook_feature_acts"][0][i][
-                                    cache[f"{sae.cfg.hook_point_out}.sae.hook_feature_acts"][0][i].nonzero(
-                                        as_tuple=True
-                                    )[0]
-                                ].tolist()
-                                for i in range(cache[f"{sae.cfg.hook_point_out}.sae.hook_feature_acts"][0].shape[0])
-                            ],
-                            "max_feature_acts": [
-                                [
-                                    max_feature_acts[name][j]
-                                    for j in cache[f"{sae.cfg.hook_point_out}.sae.hook_feature_acts"][0][i]
-                                    .nonzero(as_tuple=True)[0]
-                                    .tolist()
-                                ]
-                                for i in range(cache[f"{sae.cfg.hook_point_out}.sae.hook_feature_acts"][0].shape[0])
-                            ],
-                        }
-                        for sae, name in saes
-                    ],
-                }
-    return Response(content=msgpack.packb(result), media_type="application/x-msgpack")
-
-
-class ModelTraceRequest(BaseModel):
-    input_text: str | list[int]
-    saes: list[str] = []
-    steerings: list[SteeringConfig] = []
-    tracings: list[Node] = []
-    tracing_threshold: float = 0.1
-    tracing_top_k: int | None = None
-    detach_at_attn_scores: bool = False
-
-
-@app.post("/model/trace")
-def model_trace(request: ModelTraceRequest):
-    dictionaries = client.list_dictionaries(dictionary_series=dictionary_series)
-    assert len(dictionaries) > 0, "No dictionaries found. Model name cannot be inferred."
-    model = get_model(dictionaries[0])
-    assert model.tokenizer is not None, "Tokenizer not found"
-    saes = [(get_sae(name), name) for name in request.saes]
-    max_feature_acts = {
-        name: client.get_max_feature_acts(name, dictionary_series=dictionary_series) for _, name in saes
-    }
-    assert all(
-        max_feature_acts is not None for max_feature_acts in max_feature_acts.values()
-    ), "Max feature acts not found"
-    max_feature_acts = cast(dict[str, dict[int, int]], max_feature_acts)
-    assert all(steering.sae in request.saes for steering in request.steerings), "Steering SAE not found"
-    assert all(
-        tracing.sae in request.saes for tracing in request.tracings if isinstance(tracing, FeatureNode)
-    ), "Tracing SAE not found"
-
-    def generate_steering_hook(steering: SteeringConfig):
-        feature_acts = None
-        sae = get_sae(steering.sae)
-
-        def steer(tensor: torch.Tensor):
-            assert len(tensor.shape) == 3
-            tensor = tensor.clone()
-            if steering.steering_type == "times":
-                assert steering.steering_value is not None
-                tensor[:, :, steering.feature_index] *= steering.steering_value
-            elif steering.steering_type == "ablate":
-                tensor[:, :, steering.feature_index] = 0
-            elif steering.steering_type == "add":
-                assert steering.steering_value is not None
-                tensor[:, :, steering.feature_index] += steering.steering_value
-            elif steering.steering_type == "set":
-                assert steering.steering_value is not None
-                tensor[:, :, steering.feature_index] = steering.steering_value
-            return tensor
-
-        def save_feature_acts_hook(tensor: torch.Tensor, hook: HookPoint):
-            nonlocal feature_acts
-            feature_acts = tensor
-            return steer(tensor)
-
-        def steering_hook(tensor: torch.Tensor, hook: HookPoint):
-            assert feature_acts is not None, "Feature acts should be saved before steering"
-            difference = (steer(feature_acts) - feature_acts) @ sae.decoder.weight.T
-            tensor += difference.detach()
-            return tensor
-
-        sae = get_sae(steering.sae)
-        return [
-            (f"{sae.cfg.hook_point_out}.sae.hook_feature_acts", save_feature_acts_hook),
-            (f"{sae.cfg.hook_point_out}", steering_hook),
-        ]
-
-    steering_hooks = sum([generate_steering_hook(steering) for steering in request.steerings], [])
-
-    candidates = [f"{sae.cfg.hook_point_out}.sae.hook_feature_acts" for sae, _ in saes]
-    if request.detach_at_attn_scores:
-        candidates += [f"blocks.{i}.attn.hook_attn_scores" for i in range(model.cfg.n_layers)]
-
-    with apply_sae(model, [sae for sae, _ in saes]):
-        with model.hooks(steering_hooks):
-            with detach_at(model, candidates):
-                input = (
-                    model.to_tokens(request.input_text, prepend_bos=False)
-                    if isinstance(request.input_text, str)
-                    else torch.tensor([request.input_text], device=device)
-                )
-                name_filter = (
-                    [f"{sae.cfg.hook_point_out}.sae.hook_feature_acts" for sae, _ in saes]
-                    + [f"{sae.cfg.hook_point_out}.sae.hook_feature_acts.pre" for sae, _ in saes]
-                    + [f"{sae.cfg.hook_point_out}.sae.hook_feature_acts.post" for sae, _ in saes]
-                )
-                if request.detach_at_attn_scores:
-                    name_filter += [f"blocks.{i}.attn.hook_attn_scores.pre" for i in range(model.cfg.n_layers)] + [
-                        f"blocks.{i}.attn.hook_attn_scores.post" for i in range(model.cfg.n_layers)
-                    ]
-                    name_filter += [f"blocks.{i}.attn.hook_pattern" for i in range(model.cfg.n_layers)]
-                logits, cache = model.run_with_ref_cache(input, names_filter=name_filter)
-                tracing_results = []
-                for tracing in request.tracings:
-                    model.zero_grad()
-                    if isinstance(tracing, LogitsNode):
-                        assert tracing.position < logits.shape[1], "Position out of range"
-                        assert tracing.token_id < logits.shape[2], "Token id out of range"
-                        logits[:, tracing.position, tracing.token_id].backward(retain_graph=True)
-                        node = {
-                            **tracing.model_dump(),
-                            "activation": logits[0, tracing.position, tracing.token_id].item(),
-                            "id": f"logits-{tracing.position}-{tracing.token_id}",
-                        }
-                    elif isinstance(tracing, FeatureNode):
-                        sae = get_sae(tracing.sae)
-                        assert (
-                            tracing.position < cache[f"{sae.cfg.hook_point_out}.sae.hook_feature_acts.pre"][0].shape[0]
-                        ), "Position out of range"
-                        assert (
-                            tracing.feature_index
-                            < cache[f"{sae.cfg.hook_point_out}.sae.hook_feature_acts.pre"][0].shape[1]
-                        ), "Feature index out of range"
-                        cache[f"{sae.cfg.hook_point_out}.sae.hook_feature_acts.pre"][0][
-                            tracing.position, tracing.feature_index
-                        ].backward(retain_graph=True)
-                        node = {
-                            **tracing.model_dump(),
-                            "activation": cache[f"{sae.cfg.hook_point_out}.sae.hook_feature_acts.pre"][0][
-                                tracing.position, tracing.feature_index
-                            ].item(),
-                            "max_activation": max_feature_acts[tracing.sae][tracing.feature_index],
-                            "id": f"feature-{tracing.sae}-{tracing.position}-{tracing.feature_index}",
-                        }
-                    elif isinstance(tracing, AttnScoreNode):
-                        assert tracing.layer < model.cfg.n_layers, "Layer out of range"
-                        attn_scores = cache[f"blocks.{tracing.layer}.attn.hook_attn_scores.pre"]
-                        assert tracing.head < attn_scores.shape[1], "Head out of range"
-                        assert tracing.query < attn_scores.shape[2], "Query out of range"
-                        assert tracing.key < attn_scores.shape[3], "Key out of range"
-                        attn_scores[:, tracing.head, tracing.query, tracing.key].backward(retain_graph=True)
-                        node = {
-                            **tracing.model_dump(),
-                            "activation": attn_scores[0, tracing.head, tracing.query, tracing.key].item(),
-                            "id": f"attn-score-{tracing.layer}-{tracing.head}-{tracing.query}-{tracing.key}",
-                            "pattern": cache[f"blocks.{tracing.layer}.attn.hook_pattern"][0][
-                                tracing.head, tracing.query, tracing.key
-                            ].item(),
-                        }
-                    else:
-                        raise AssertionError("Unknown node type")
-
-                    contributors = []
-                    for sae, name in saes:
-                        feature_acts = cache[f"{sae.cfg.hook_point_out}.sae.hook_feature_acts.post"]
-                        if feature_acts.grad is None:
-                            continue
-                        attributions = feature_acts.grad[0] * feature_acts[0]
-                        for index in (attributions > request.tracing_threshold).nonzero():
-                            index = tuple(index.tolist())
-                            contributors.append(
-                                {
-                                    "node": {
-                                        "type": "feature",
-                                        "sae": name,
-                                        "feature_index": index[1],
-                                        "position": index[0],
-                                        "activation": feature_acts[0][index].item(),
-                                        "max_activation": max_feature_acts[name][index[1]],
-                                        "id": f"feature-{name}-{index[0]}-{index[1]}",
-                                    },
-                                    "attribution": attributions[index].item(),
-                                }
-                            )
-                        feature_acts.grad.zero_()
-
-                    if request.detach_at_attn_scores:
-                        for i in range(model.cfg.n_layers):
-                            attn_scores = cache[f"blocks.{i}.attn.hook_attn_scores.post"]
-                            if attn_scores.grad is None:
-                                continue
-                            attributions = attn_scores.grad[0] * attn_scores[0]
-                            for index in (attributions > request.tracing_threshold).nonzero():
-                                index = tuple(index.tolist())
-                                contributors.append(
-                                    {
-                                        "node": {
-                                            "type": "attn-score",
-                                            "layer": i,
-                                            "head": index[0],
-                                            "query": index[1],
-                                            "key": index[2],
-                                            "activation": attn_scores[0][index].item(),
-                                            "pattern": cache[f"blocks.{i}.attn.hook_pattern"][0][index].item(),
-                                            "id": f"attn-score-{i}-{index[0]}-{index[1]}-{index[2]}",
-                                        },
-                                        "attribution": attributions[index].item(),
-                                    }
-                                )
-                            attn_scores.grad.zero_()
-
-                    if request.tracing_top_k is not None:
-                        contributors = sorted(contributors, key=lambda c: -c["attribution"])[: request.tracing_top_k]
-
-                    tracing_results.append({"node": node, "contributors": contributors})
-
-                result = {
-                    "context": [
-                        bytearray([byte_decoder[c] for c in t])
-                        # Method `convert_ids_to_tokens` should exist on GPT2Tokenizer and other BPE tokenizers.
-                        for t in model.tokenizer.convert_ids_to_tokens(input[0])  # type: ignore
-                    ],
-                    "token_ids": input[0].tolist(),
-                    "tracings": tracing_results,
-                }
-    return Response(content=msgpack.packb(result), media_type="application/x-msgpack")
-
-
-@app.post("/dictionaries/{dictionary_name}/features/{feature_index}/interpret")
-def feature_interpretation(
-    dictionary_name: str,
-    feature_index: int,
-    type: str,
-    custom_interpretation: str | None = None,
-):
-    model = get_model(dictionary_name)
-    dictionary = client.get_dictionary(dictionary_name, dictionary_series=dictionary_series)
-    assert dictionary is not None, "Dictionary not found"
-    path = dictionary["path"]
-    if type == "custom":
-        interpretation: Any = {
-            "text": custom_interpretation,
-            "validation": [
-                {
-                    "method": "manual",
-                    "passed": True,
-                }
-            ],
-        }
-    elif type == "auto":
-        cfg = AutoInterpConfig(
-            **{
-                "sae": SAEConfig.from_pretrained(path).to_dict(),
-                "lm": LanguageModelConfig.from_pretrained_sae(path).to_dict(),
-                "openai_api_key": os.environ.get("OPENAI_API_KEY"),
-                "openai_base_url": os.environ.get("OPENAI_BASE_URL"),
-            }
-        )
-        feature = client.get_feature(dictionary_name, feature_index, dictionary_series=dictionary_series)
-        assert feature is not None, "Feature not found"
-        result = generate_description(model, feature["analysis"][0], cfg)
-        interpretation = {
-            "text": result["response"],
-            "validation": [],
-            "detail": result,
-        }
-    elif type == "validate":
-        cfg = AutoInterpConfig(
-            **{
-                "sae": SAEConfig.from_pretrained(path).to_dict(),
-                "lm": LanguageModelConfig.from_pretrained_sae(path).to_dict(),
-                "openai_api_key": os.environ.get("OPENAI_API_KEY"),
-                "openai_base_url": os.environ.get("OPENAI_BASE_URL"),
-            }
-        )
-        feature = client.get_feature(dictionary_name, feature_index, dictionary_series=dictionary_series)
-        assert feature is not None, "Feature not found"
-        interpretation = feature["interpretation"] if "interpretation" in feature else None
-        if interpretation is None:
-            return Response(content="Feature interpretation not found", status_code=404)
-        validation = cast(Any, interpretation["validation"])
-        if not any(v["method"] == "activation" for v in validation):
-            validation_result = check_description(
-                model,
-                cfg,
-                feature_index,
-                cast(str, interpretation["text"]),
-                False,
-                feature_activation=feature["analysis"][0],
-            )
-            validation.append(
-                {
-                    "method": "activation",
-                    "passed": validation_result["passed"],
-                    "detail": validation_result,
-                }
-            )
-        if not any(v["method"] == "generative" for v in validation):
-            validation_result = check_description(
-                model,
-                cfg,
-                feature_index,
-                cast(str, interpretation["text"]),
-                True,
-                sae=get_sae(dictionary_name),
-            )
-            validation.append(
-                {
-                    "method": "generative",
-                    "passed": validation_result["passed"],
-                    "detail": validation_result,
-                }
-            )
-    else:
-        return Response(content="Invalid interpretation type", status_code=400)
-
-    try:
-        client.update_feature(
-            dictionary_name,
-            feature_index,
-            {"interpretation": interpretation},
-            dictionary_series=dictionary_series,
-        )
-    except ValueError as e:
-        return Response(content=str(e), status_code=400)
-    return interpretation
 
 
 app.add_middleware(
