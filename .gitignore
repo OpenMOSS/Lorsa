@@ -2,8 +2,6 @@ wandb/
 exp/
 PySvelte/
 result/
-sweep_result/
-test_result/
 .vscode/
 *.env
 *.pyc

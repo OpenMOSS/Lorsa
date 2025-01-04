@@ -170,6 +170,29 @@ class LorsaTrainConfig:
 
 
 @dataclass(kw_only=True)
+class LorsaEvaluateConfig:
+    # lorsa config
+    lorsa_dir: str
+    lorsa_config: LorsaConfig
+    
+    # dataset config
+    dataset_path: str
+    dataset_type: Literal["text", "activation"]
+    num_workers: int
+    prefetch_factor: int
+    lm_batch_size: int
+    buffer_size: int
+    
+    # evaluating config
+    batch_size: int
+    total_tokens: int
+    
+    # orig attention head config
+    model_name: str = None
+    layer: int
+    prepend_bos: bool = None
+
+@dataclass(kw_only=True)
 class LorsaAnalyzeConfig:
     # lorsa config
     lorsa_config: LorsaConfig

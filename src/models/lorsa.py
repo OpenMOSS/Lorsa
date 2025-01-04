@@ -241,7 +241,7 @@ class LowRankSparseAttention(nn.Module):
         '''
         
         q, k, v, pattern = self.cal_q_k_v_pattern(resid)
-                
+
         z = self.cal_z_with_h(v, pattern) # Shape: (batch_size, query_pos, n_heads, d_head)
 
         return self.decode_z_with_W_O(z)
