@@ -202,8 +202,8 @@ class LowRankSparseAttention(nn.Module):
     
     def cal_z_with_h(
         self, 
-        v: torch.Tensor, 
-        pattern: torch.Tensor
+        v: torch.Tensor, # Shape: (batch_size, key_pos, n_ov_heads, d_head)
+        pattern: torch.Tensor # Shape: (batch_size, n_qk_heads, query_pos, key_pos)
     ) -> Float[torch.Tensor, "batch_size query_pos n_heads d_head"]:
         """
         Get Z pattern (summing over key positions).
@@ -213,17 +213,13 @@ class LowRankSparseAttention(nn.Module):
             v, "batch key_pos head_index d_head -> batch head_index key_pos d_head"
         ) # Shape: (batch_size, n_ov_heads, key_pos, d_head)
         
-        pattern_ = pattern.repeat_interleave(
-            self.cfg.n_ov_heads // self.cfg.n_qk_heads, 
-            dim=1,
-        ) # Shape: (batch_size, n_ov_heads, query_pos, key_pos)
+        v_reshaped = v_.view(v_.shape[0], self.cfg.n_qk_heads, self.cfg.n_ov_heads // self.cfg.n_qk_heads, v_.shape[2], v_.shape[3])
         
-        z = torch.matmul(pattern_, v_)  # Shape: (batch_size, n_heads, query_pos, d_head)
-
-        # Rearrange z to the desired shape
-        z = einops.rearrange(
-            z, "batch head_index query_pos d_head -> batch query_pos head_index d_head"
-        ) # shape: (batch_size, query_pos, n_heads, d_head)
+        z = torch.einsum('bnqk,bnrkh->bnrqh', pattern, v_reshaped) # Shape: (batch_size, n_qk_heads, n_ov_heads/n_qk_heads, query_pos, d_head)
+        
+        z = z.reshape(z.shape[0], z.shape[1] * z.shape[2], z.shape[3], z.shape[4]) # Shape: (batch_size, n_ov_heads, query_pos, d_head)
+        
+        z = z.permute(0, 2, 1, 3) # Shape: (batch_size, query_pos, n_ov_heads, d_head)
         
         return z
     
@@ -245,7 +241,7 @@ class LowRankSparseAttention(nn.Module):
         '''
         
         q, k, v, pattern = self.cal_q_k_v_pattern(resid)
-                
+
         z = self.cal_z_with_h(v, pattern) # Shape: (batch_size, query_pos, n_heads, d_head)
 
         return self.decode_z_with_W_O(z)
@@ -442,6 +438,7 @@ class LowRankSparseAttention(nn.Module):
 
         return torch.cat([x_rotated, x_pass], dim=-1)
 
+    '''
     def calculate_sin_cos_rotary(
         self,
         rotary_dim: int,
@@ -468,7 +465,59 @@ class LowRankSparseAttention(nn.Module):
         # Create a n_ctx x rotary_dim tensor, where each column is an arithmetic sequence of angles in that frequency
         angles = pos[:, None] / freq[None, :]
         return torch.sin(angles).to(dtype), torch.cos(angles).to(dtype)
+    '''
 
+    def calculate_sin_cos_rotary(
+        self,
+        rotary_dim: int,
+        n_ctx: int,
+        base: int = 10000,
+        dtype: torch.dtype = torch.float32,
+    ) -> Tuple[Float[torch.Tensor, "n_ctx rotary_dim"], Float[torch.Tensor, "n_ctx rotary_dim"]]:
+        """
+        Calculate the sine and cosine waves to use in a rotary embedding. See https://blog.eleuther.ai/rotary-embeddings/ for details
+
+        Note: For some inexplicable reason, in GPT-J each ADJACENT pair of elements in k and q are rotated, in GPT-NeoX the pair of elements at k and k+n//2 are rotated (ie folding the full length in half, and then looking at pairs accordingly). I have absolutely no clue why, it should be completely equivalent.
+        To resolve this, I've coded it to default to the GPT-J mode, but to explicitly check whether it's GPT-NeoX and then do the GPT-NeoX thing if it is.
+        """
+        high_precision = torch.float32 if dtype != torch.float64 else torch.float64
+        pos = torch.arange(n_ctx, dtype=high_precision)
+        dim = torch.arange(rotary_dim // 2, dtype=high_precision)
+
+        # Llama-3.1 uses NTK-by-Parts Rotary Embedding introduced in Section 3.2 in https://arxiv.org/pdf/2309.00071
+        # Implementation copied from https://github.com/huggingface/transformers/blob/v4.46.0/src/transformers/modeling_rope_utils.py#L310
+        if self.cfg.use_NTK_by_parts_rope:
+            inv_freq = 1.0 / (
+                base ** (torch.arange(0, rotary_dim, 2, dtype=torch.int64).float() / rotary_dim)
+            )
+            factor = self.cfg.NTK_by_parts_factor
+            low_freq_factor = self.cfg.NTK_by_parts_low_freq_factor
+            high_freq_factor = self.cfg.NTK_by_parts_high_freq_factor
+            old_context_len = self.cfg.old_context_len
+
+            low_freq_wavelen = old_context_len / low_freq_factor
+            high_freq_wavelen = old_context_len / high_freq_factor
+
+            wavelen = 2 * math.pi / inv_freq
+            inv_freq_llama = torch.where(wavelen > low_freq_wavelen, inv_freq / factor, inv_freq)
+            smooth_factor = (old_context_len / wavelen - low_freq_factor) / (
+                high_freq_factor - low_freq_factor
+            )
+            smoothed_inv_freq = (
+                1 - smooth_factor
+            ) * inv_freq_llama / factor + smooth_factor * inv_freq_llama
+            is_medium_freq = ~(wavelen < high_freq_wavelen) * ~(wavelen > low_freq_wavelen)
+            inv_freq_llama = torch.where(is_medium_freq, smoothed_inv_freq, inv_freq_llama)
+            freq = 1 / inv_freq_llama
+        else:
+            freq = base ** (dim / (rotary_dim / 2))
+        if self.cfg.rotary_adjacent_pairs:
+            freq = einops.repeat(freq, "d -> (d 2)")
+        else:
+            freq = einops.repeat(freq, "d -> (2 d)")
+        # Create a n_ctx x rotary_dim tensor, where each column is an arithmetic sequence of angles in that frequency
+        angles = pos[:, None] / freq[None, :]
+        return torch.sin(angles).to(dtype), torch.cos(angles).to(dtype)
 
     def apply_causal_mask(
         self,

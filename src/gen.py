@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 import torch
 from torch.utils.data import DataLoader
 import torch.multiprocessing as mp
-from transformers import GPTNeoXForCausalLM, GPTNeoXTokenizerFast
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformer_lens import HookedTransformer
 from datasets import load_from_disk
 from tqdm import tqdm
@@ -14,11 +14,11 @@ from config import DataGenConfig
 @torch.no_grad()
 def generate_train_data(cfg: DataGenConfig):
     # load model
-    hf_model = GPTNeoXForCausalLM.from_pretrained(
+    hf_model = AutoModelForCausalLM.from_pretrained(
         cfg.model, 
         local_files_only=True
     )
-    tokenizer = GPTNeoXTokenizerFast.from_pretrained(
+    tokenizer = AutoTokenizer.from_pretrained(
         cfg.model, 
         local_files_only=True
     )
@@ -35,7 +35,7 @@ def generate_train_data(cfg: DataGenConfig):
     # load dataset
     dataset = load_from_disk(cfg.dataset_path)
     filtered_dataset = dataset.filter(
-        lambda example: len(tokenizer.encode(example['text'])) >= cfg.n_ctx,
+        lambda example: len(tokenizer.encode(example['text'], max_length=cfg.n_ctx, truncation=True)) >= cfg.n_ctx,
         num_proc = cfg.num_proc,
     )
     # create DataLoader
@@ -61,7 +61,7 @@ def generate_train_data(cfg: DataGenConfig):
 
             for key, value in cache.items():
                 result_dir = os.path.join(cfg.result_dir, key)
-                tasks.append((value, result_dir, f'{batch_index}.pt'))
+                tasks.append((value.to(cfg.dtype), result_dir, f'{batch_index}.pt'))
 
             futures = [executor.submit(save_tensor, task) for task in tasks]
 
