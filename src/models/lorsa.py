@@ -323,7 +323,7 @@ class LowRankSparseAttention(nn.Module):
         
         return top_k_out, top_k_indices
     
-    def cal_out_top_k_for_ov1(self, resid: torch.Tensor):
+    def cal_out_top_k_for_ov1(self, resid: torch.Tensor, filter_mask: torch.Tensor):
         q, k, v, pattern = self.cal_q_k_v_pattern(resid)
         
         # z: (batch_size, query_pos, n_heads, d_head)
@@ -336,6 +336,7 @@ class LowRankSparseAttention(nn.Module):
             else:
                 l1 = torch.abs(z.squeeze(-1)) * torch.norm(self.W_O, p=2, dim=2).view(1, 1, self.cfg.n_ov_heads)
             
+            # topk
             k_smallest = self.cfg.n_ov_heads - self.cfg.top_k + 1
 
             # top_k_values: (batch_size, query_pos)
@@ -343,6 +344,35 @@ class LowRankSparseAttention(nn.Module):
             
             # top_k_mask: (batch_size, query_pos, n_heads)
             top_k_mask = l1 >= top_k_values.unsqueeze(-1)
+
+            '''
+            # batch topk
+            k_smallest = (self.cfg.n_ov_heads - self.cfg.top_k) * filter_mask.numel() + 1
+
+            top_k_values, _ = torch.kthvalue(l1.contiguous().view(-1), k=k_smallest)
+
+            top_k_mask = l1 >= top_k_values
+            
+            # approximate batch topk
+            k_smallest = self.cfg.n_ov_heads - self.cfg.top_k + 1
+
+            # top_k_values: (batch_size, query_pos)
+            top_k_values, _ = torch.kthvalue(l1, k=k_smallest, dim=2)
+            
+            # top_k_mask: (batch_size, query_pos, n_heads)
+            top_k_mask = l1 >= top_k_values[filter_mask].median()
+
+            # sentence topk
+            k_smallest = filter_mask.sum(dim=-1) * (self.cfg.n_ov_heads - self.cfg.top_k) + 1
+
+            l1[~filter_mask] = float('-inf')
+
+            flat_l1 = l1.contiguous().view(l1.shape[0], -1)
+
+            top_k_values = torch.stack([flat_l1[i].kthvalue(k_smallest[i]).values for i in range(l1.shape[0])])
+
+            top_k_mask = l1 >= top_k_values.view(-1, 1, 1)
+            '''
 
         top_k_z = z * top_k_mask.unsqueeze(-1)
 
