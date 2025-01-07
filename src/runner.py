@@ -105,3 +105,4 @@ def analyze_lorsa_runner(cfg: LorsaAnalyzeConfig):
         activation_dataset = PresaveActivationDataset(cfg=cfg)
     else:
         raise ValueError(f"Unknown dataset type: {cfg.dataset_type}")
+

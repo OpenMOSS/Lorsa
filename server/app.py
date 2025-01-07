@@ -12,7 +12,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import torch
 from datasets import Dataset, load_from_disk
-from transformers import GPTNeoXForCausalLM, GPTNeoXTokenizerFast
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
@@ -42,6 +42,7 @@ dataset_cache: dict[str, Dataset] = {}
 def get_model(lorsa_name: str) -> HookedTransformer:
     MODEL_PATH = {
         'EleutherAI/pythia-160m': '/inspire/hdd/ws-8207e9e2-e733-4eec-a475-cfa1c36480ba/embodied-multimodality/public/zfhe/models/pythia-160m',
+        "meta-llama/Llama-3.1-8B": "/inspire/hdd/ws-8207e9e2-e733-4eec-a475-cfa1c36480ba/embodied-multimodality/public/zfhe/models/Llama-3.1-8B",
     }
     
     path = f"{result_dir}/{lorsa_name}"
@@ -50,11 +51,11 @@ def get_model(lorsa_name: str) -> HookedTransformer:
     model_path = MODEL_PATH[cfg.model_name]
 
     if (cfg.model_name, model_path) not in lm_cache:
-        hf_model = GPTNeoXForCausalLM.from_pretrained(
+        hf_model = AutoModelForCausalLM.from_pretrained(
             model_path, 
             local_files_only=True,
         ).to(device)
-        tokenizer = GPTNeoXTokenizerFast.from_pretrained(
+        tokenizer = AutoTokenizer.from_pretrained(
             model_path, 
             local_files_only=True,
         )
@@ -154,7 +155,10 @@ def get_head(lorsa_name: str, head_index: str | int):
     sample_results = torch.load(f"{result_dir}/{lorsa_name}/sample_results.pt", map_location=device)
 
     if head_index == "random":
-        head_index = random.randint(0, sample_results['elt'].size(0) - 1)
+        # head_index = random.randint(0, sample_results['elt'].size(0) - 1)
+        head_index = random.choice(
+            (sample_results['act_times'] > 1000).nonzero().squeeze(1).cpu().tolist()
+        )
 
     return Response(
         content=msgpack.packb(
@@ -172,48 +176,48 @@ def get_head(lorsa_name: str, head_index: str | int):
                     model=model,
                 ),
                 'act_times': sample_results['act_times'][head_index].item(),
-                'correlation_to_saes': {
-                    'wo_lxa': {
-                        'most_correlated_features_weight_based': {
-                            'feature_id': sample_results['wo_lxa_most_correlated_sae_features'][head_index],
-                            'decoder_cosine_similarities': sample_results['wo_lxa_most_correlated_sae_feature_cos_sims'][head_index],
-                            'wo_encoder_dfa': sample_results['wo_lxa_most_correlated_feature_dfas'][head_index],
-                        },
-                        'most_anti_correlated_features_weight_based': {
-                            'feature_id': sample_results['wo_lxa_most_anti_correlated_sae_features'][head_index],
-                            'decoder_cosine_similarities': sample_results['wo_lxa_most_anti_correlated_sae_feature_cos_sims'][head_index],
-                            'wo_encoder_dfa': sample_results['wo_lxa_most_anti_correlated_feature_dfas'][head_index],
-                        },
-                        'most_correlated_features_sample_based': {
-                            'feature_id': sample_results['sample_based_max_correlated_OVoutput_features'][head_index],
-                            'average_feature_act_given_lorsa_is_activated': sample_results['sample_based_max_correlated_OVoutput_feature_acts'][head_index],
-                        },
-                    },
-                    'wv_lxain': {
-                        'most_correlated_features_weight_based': {
-                            'feature_id': sample_results['wv_lxain_most_correlated_sae_features'][head_index],
-                            'decoder_wv_dfa': sample_results['wv_lxain_most_correlated_sae_features_dfas'][head_index],
-                        },
-                        'most_correlated_features_sample_based': {
-                            'feature_id': sample_results['sample_based_max_correlated_k_pos_features'][head_index],
-                            'average_feature_act_given_lorsa_is_activated': sample_results['sample_based_max_correlated_k_pos_feature_acts'][head_index],
-                        },
-                    },
-                    'wq_lxain': {
-                        'most_correlated_features_sample_based': {
-                            'feature_id': sample_results['sample_based_max_correlated_q_pos_features'][head_index],
-                            'average_feature_act_given_lorsa_is_activated': sample_results['sample_based_max_correlated_q_pos_feature_acts'][head_index],
-                            'fraction_of_norm_in_column_space': sample_results['wq_lxain_fraction_of_sae_dec_norms_covered_by_wq'][head_index],
-                        },
-                    },
-                    'wk_lxain': {
-                        'most_correlated_features_sample_based': {
-                            'feature_id': sample_results['sample_based_max_correlated_k_pos_features'][head_index],
-                            'average_feature_act_given_lorsa_is_activated': sample_results['sample_based_max_correlated_k_pos_feature_acts'][head_index],
-                            'fraction_of_norm_in_column_space': sample_results['wk_lxain_fraction_of_sae_dec_norms_covered_by_wk'][head_index],
-                        },
-                    },
-                },
+                # 'correlation_to_saes': {
+                #     'wo_lxa': {
+                #         'most_correlated_features_weight_based': {
+                #             'feature_id': sample_results['wo_lxa_most_correlated_sae_features'][head_index],
+                #             'decoder_cosine_similarities': sample_results['wo_lxa_most_correlated_sae_feature_cos_sims'][head_index],
+                #             'wo_encoder_dfa': sample_results['wo_lxa_most_correlated_feature_dfas'][head_index],
+                #         },
+                #         'most_anti_correlated_features_weight_based': {
+                #             'feature_id': sample_results['wo_lxa_most_anti_correlated_sae_features'][head_index],
+                #             'decoder_cosine_similarities': sample_results['wo_lxa_most_anti_correlated_sae_feature_cos_sims'][head_index],
+                #             'wo_encoder_dfa': sample_results['wo_lxa_most_anti_correlated_feature_dfas'][head_index],
+                #         },
+                #         'most_correlated_features_sample_based': {
+                #             'feature_id': sample_results['sample_based_max_correlated_OVoutput_features'][head_index],
+                #             'average_feature_act_given_lorsa_is_activated': sample_results['sample_based_max_correlated_OVoutput_feature_acts'][head_index],
+                #         },
+                #     },
+                #     'wv_lxain': {
+                #         'most_correlated_features_weight_based': {
+                #             'feature_id': sample_results['wv_lxain_most_correlated_sae_features'][head_index],
+                #             'decoder_wv_dfa': sample_results['wv_lxain_most_correlated_sae_features_dfas'][head_index],
+                #         },
+                #         'most_correlated_features_sample_based': {
+                #             'feature_id': sample_results['sample_based_max_correlated_k_pos_features'][head_index],
+                #             'average_feature_act_given_lorsa_is_activated': sample_results['sample_based_max_correlated_k_pos_feature_acts'][head_index],
+                #         },
+                #     },
+                #     'wq_lxain': {
+                #         'most_correlated_features_sample_based': {
+                #             'feature_id': sample_results['sample_based_max_correlated_q_pos_features'][head_index],
+                #             'average_feature_act_given_lorsa_is_activated': sample_results['sample_based_max_correlated_q_pos_feature_acts'][head_index],
+                #             'fraction_of_norm_in_column_space': sample_results['wq_lxain_fraction_of_sae_dec_norms_covered_by_wq'][head_index],
+                #         },
+                #     },
+                #     'wk_lxain': {
+                #         'most_correlated_features_sample_based': {
+                #             'feature_id': sample_results['sample_based_max_correlated_k_pos_features'][head_index],
+                #             'average_feature_act_given_lorsa_is_activated': sample_results['sample_based_max_correlated_k_pos_feature_acts'][head_index],
+                #             'fraction_of_norm_in_column_space': sample_results['wk_lxain_fraction_of_sae_dec_norms_covered_by_wk'][head_index],
+                #         },
+                #     },
+                # },
                 "interpretation": None,
             })
         ),
