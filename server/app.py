@@ -12,7 +12,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import torch
 from datasets import Dataset, load_from_disk
-from transformers import GPTNeoXForCausalLM, GPTNeoXTokenizerFast
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
@@ -42,6 +42,7 @@ dataset_cache: dict[str, Dataset] = {}
 def get_model(lorsa_name: str) -> HookedTransformer:
     MODEL_PATH = {
         'EleutherAI/pythia-160m': '/inspire/hdd/ws-8207e9e2-e733-4eec-a475-cfa1c36480ba/embodied-multimodality/public/zfhe/models/pythia-160m',
+        "meta-llama/Llama-3.1-8B": "/inspire/hdd/ws-8207e9e2-e733-4eec-a475-cfa1c36480ba/embodied-multimodality/public/zfhe/models/Llama-3.1-8B",
     }
     
     path = f"{result_dir}/{lorsa_name}"
@@ -50,11 +51,11 @@ def get_model(lorsa_name: str) -> HookedTransformer:
     model_path = MODEL_PATH[cfg.model_name]
 
     if (cfg.model_name, model_path) not in lm_cache:
-        hf_model = GPTNeoXForCausalLM.from_pretrained(
+        hf_model = AutoModelForCausalLM.from_pretrained(
             model_path, 
             local_files_only=True,
         ).to(device)
-        tokenizer = GPTNeoXTokenizerFast.from_pretrained(
+        tokenizer = AutoTokenizer.from_pretrained(
             model_path, 
             local_files_only=True,
         )
@@ -154,7 +155,10 @@ def get_head(lorsa_name: str, head_index: str | int):
     sample_results = torch.load(f"{result_dir}/{lorsa_name}/sample_results.pt", map_location=device)
 
     if head_index == "random":
-        head_index = random.randint(0, sample_results['elt'].size(0) - 1)
+        # head_index = random.randint(0, sample_results['elt'].size(0) - 1)
+        head_index = random.choice(
+            (sample_results['act_times'] > 1000).nonzero().squeeze(1).cpu().tolist()
+        )
 
     return Response(
         content=msgpack.packb(

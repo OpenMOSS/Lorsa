@@ -177,26 +177,30 @@ class LowRankSparseAttention(nn.Module):
         self, 
         v: torch.Tensor, 
         pattern: torch.Tensor,
+        interested_head_mask: Float[torch.Tensor, "reduced_n_ov_heads"] | None = None,
     ) -> Float[torch.Tensor, "batch_size query_pos key_pos n_heads d_head"]:
         """
         Get Z pattern of each key pos without summing, might consume a lot of memory.
+        `interested_head_mask` indexes the heads we are interested.
         """
-        
+
+        if interested_head_mask is None:
+            interested_head_mask = torch.arange(v.size(2), dtype=torch.int32, device=v.device)
+                
         v_ = einops.rearrange(
             v, "batch key_pos head_index d_head -> batch head_index key_pos d_head"
-        ) # Shape: (batch_size, n_ov_heads, key_pos, d_head)
+        )[:, interested_head_mask, :, :] # Shape: (batch_size, reduced_n_ov_heads, key_pos, d_head)
         
-        pattern_ = pattern.repeat_interleave(
-            self.cfg.n_ov_heads // self.cfg.n_qk_heads, 
-            dim=1,
-        ) # Shape: (batch_size, n_ov_heads, query_pos, key_pos)
+        lorsa_rate = self.cfg.n_ov_heads // self.cfg.n_qk_heads
+        pattern_ = pattern[:, interested_head_mask // lorsa_rate, :, :] # Shape: (batch_size, reduced_n_ov_heads, query_pos, key_pos)
         
-        z = pattern_[:, :, :, :, None] * v_[:, :, None, :, :] # Shape: (batch_size, n_heads, query_pos, key_pos, d_head)
+        z = pattern_[:, :, :, :, None] * v_[:, :, None, :, :] 
+        # Shape: (batch_size, reduced_n_ov_heads, query_pos, key_pos, d_head)
 
         # Rearrange z to the desired shape
         z = einops.rearrange(
             z, "batch head_index query_pos key_pos d_head -> batch query_pos key_pos head_index d_head"
-        ) # shape: (batch_size, query_pos, key_pos, n_heads, d_head)
+        ) # shape: (batch_size, query_pos, key_pos, reduced_n_ov_heads, d_head)
         
         return z
     
@@ -553,6 +557,22 @@ class LowRankSparseAttention(nn.Module):
 
         return self
     
+    @torch.no_grad()
+    def rescale_parameters_for_expected_average_only_in(self):
+        input_scale_factor = torch.tensor(self.cfg.d_model, dtype=torch.float, device=self.cfg.device).sqrt() / self.cfg.avg_norm['in']
+        output_scale_factor = torch.tensor(self.cfg.d_model, dtype=torch.float, device=self.cfg.device).sqrt() / self.cfg.avg_norm['out']
+
+        self.W_V.data *= input_scale_factor
+
+        self.W_O.data /= output_scale_factor
+        self.b_O.data /= output_scale_factor                                                                                                    
+
+        self.W_Q.data *= input_scale_factor
+        
+        self.W_K.data *= input_scale_factor
+
+        return self
+    
     @classmethod
     def from_pretrained(cls, path: str, device: str | None = None):
         cfg = LorsaConfig.from_pretrained(path=path)
@@ -569,4 +589,6 @@ class LowRankSparseAttention(nn.Module):
         )
 
         lorsa.load_state_dict(state_dict)
+        lorsa.rescale_parameters_for_expected_average_only_in()
+
         return lorsa
