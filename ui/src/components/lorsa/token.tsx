@@ -1,6 +1,5 @@
 import { cn } from "@/lib/utils";
 import { Token } from "@/types/head";
-import { mergeUint8Arrays } from "@/utils/array";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "../ui/hover-card";
 import { Separator } from "../ui/separator";
 import { Fragment } from "react/jsx-runtime";
@@ -35,7 +34,6 @@ export type SuperTokenProps = {
 };
 
 export const SuperToken = ({ tokens, position, maxHeadAct, sampleMaxHeadAct }: SuperTokenProps) => {
-  const decoder = new TextDecoder("utf-8", { fatal: true });
   const displayText = tokens.map(token => token.token).join("")
 
   const superTokenMaxHeadAct = Math.max(...tokens.map((t) => t.headAct));
@@ -47,7 +45,8 @@ export const SuperToken = ({ tokens, position, maxHeadAct, sampleMaxHeadAct }: S
           "underline decoration-slate-400 decoration-1 decoration-dotted underline-offset-[6px]",
           superTokenMaxHeadAct > 0 && "hover:shadow-lg hover:text-gray-600 cursor-pointer",
           sampleMaxHeadAct > 0 && superTokenMaxHeadAct == sampleMaxHeadAct && "font-bold",
-          getAccentClassname(superTokenMaxHeadAct, maxHeadAct, "bg")
+          getAccentClassname(superTokenMaxHeadAct, maxHeadAct, "bg"),
+          tokens.some((t) => t.isQPosition) && "bg-green-500"
         )}
       >
         {displayText}

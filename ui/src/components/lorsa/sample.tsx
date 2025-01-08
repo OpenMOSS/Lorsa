@@ -41,10 +41,15 @@ export const HeadActivationSample = ({ sample, sampleName, maxHeadAct }: HeadAct
 
   const start = Math.max(0);
   const end = Math.min(sample.context.length);
+
+  // console.log(sample)
   const tokens = sample.context.slice(start, end).map((token, i) => ({
     token,
     headAct: sample.headActs[start + i],
+    isQPosition: sample.qPosition === start + i,
   }));
+
+  // console.log(tokens)
 
   const [tokenGroups, _] = tokens.reduce<[Token[][], Token[]]>(
     ([groups, currentGroup], token) => {
@@ -74,6 +79,7 @@ export const HeadActivationSample = ({ sample, sampleName, maxHeadAct }: HeadAct
   const tokensTrigger = sample.context.slice(startTrigger, endTrigger).map((token, i) => ({
     token,
     headAct: sample.headActs[startTrigger + i],
+    isQPosition: sample.qPosition === startTrigger + i,
   }));
 
   const [tokenGroupsTrigger, __] = tokensTrigger.reduce<[Token[][], Token[]]>(
