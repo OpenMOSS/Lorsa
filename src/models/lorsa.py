@@ -177,33 +177,37 @@ class LowRankSparseAttention(nn.Module):
         self, 
         v: torch.Tensor, 
         pattern: torch.Tensor,
+        interested_head_mask: Float[torch.Tensor, "reduced_n_ov_heads"] | None = None,
     ) -> Float[torch.Tensor, "batch_size query_pos key_pos n_heads d_head"]:
         """
         Get Z pattern of each key pos without summing, might consume a lot of memory.
+        `interested_head_mask` indexes the heads we are interested.
         """
-        
+
+        if interested_head_mask is None:
+            interested_head_mask = torch.arange(v.size(2), dtype=torch.int32, device=v.device)
+                
         v_ = einops.rearrange(
             v, "batch key_pos head_index d_head -> batch head_index key_pos d_head"
-        ) # Shape: (batch_size, n_ov_heads, key_pos, d_head)
+        )[:, interested_head_mask, :, :] # Shape: (batch_size, reduced_n_ov_heads, key_pos, d_head)
         
-        pattern_ = pattern.repeat_interleave(
-            self.cfg.n_ov_heads // self.cfg.n_qk_heads, 
-            dim=1,
-        ) # Shape: (batch_size, n_ov_heads, query_pos, key_pos)
+        lorsa_rate = self.cfg.n_ov_heads // self.cfg.n_qk_heads
+        pattern_ = pattern[:, interested_head_mask // lorsa_rate, :, :] # Shape: (batch_size, reduced_n_ov_heads, query_pos, key_pos)
         
-        z = pattern_[:, :, :, :, None] * v_[:, :, None, :, :] # Shape: (batch_size, n_heads, query_pos, key_pos, d_head)
+        z = pattern_[:, :, :, :, None] * v_[:, :, None, :, :] 
+        # Shape: (batch_size, reduced_n_ov_heads, query_pos, key_pos, d_head)
 
         # Rearrange z to the desired shape
         z = einops.rearrange(
             z, "batch head_index query_pos key_pos d_head -> batch query_pos key_pos head_index d_head"
-        ) # shape: (batch_size, query_pos, key_pos, n_heads, d_head)
+        ) # shape: (batch_size, query_pos, key_pos, reduced_n_ov_heads, d_head)
         
         return z
     
     def cal_z_with_h(
         self, 
-        v: torch.Tensor, 
-        pattern: torch.Tensor
+        v: torch.Tensor, # Shape: (batch_size, key_pos, n_ov_heads, d_head)
+        pattern: torch.Tensor # Shape: (batch_size, n_qk_heads, query_pos, key_pos)
     ) -> Float[torch.Tensor, "batch_size query_pos n_heads d_head"]:
         """
         Get Z pattern (summing over key positions).
@@ -213,17 +217,13 @@ class LowRankSparseAttention(nn.Module):
             v, "batch key_pos head_index d_head -> batch head_index key_pos d_head"
         ) # Shape: (batch_size, n_ov_heads, key_pos, d_head)
         
-        pattern_ = pattern.repeat_interleave(
-            self.cfg.n_ov_heads // self.cfg.n_qk_heads, 
-            dim=1,
-        ) # Shape: (batch_size, n_ov_heads, query_pos, key_pos)
+        v_reshaped = v_.view(v_.shape[0], self.cfg.n_qk_heads, self.cfg.n_ov_heads // self.cfg.n_qk_heads, v_.shape[2], v_.shape[3])
         
-        z = torch.matmul(pattern_, v_)  # Shape: (batch_size, n_heads, query_pos, d_head)
-
-        # Rearrange z to the desired shape
-        z = einops.rearrange(
-            z, "batch head_index query_pos d_head -> batch query_pos head_index d_head"
-        ) # shape: (batch_size, query_pos, n_heads, d_head)
+        z = torch.einsum('bnqk,bnrkh->bnrqh', pattern, v_reshaped) # Shape: (batch_size, n_qk_heads, n_ov_heads/n_qk_heads, query_pos, d_head)
+        
+        z = z.reshape(z.shape[0], z.shape[1] * z.shape[2], z.shape[3], z.shape[4]) # Shape: (batch_size, n_ov_heads, query_pos, d_head)
+        
+        z = z.permute(0, 2, 1, 3) # Shape: (batch_size, query_pos, n_ov_heads, d_head)
         
         return z
     
@@ -245,7 +245,7 @@ class LowRankSparseAttention(nn.Module):
         '''
         
         q, k, v, pattern = self.cal_q_k_v_pattern(resid)
-                
+
         z = self.cal_z_with_h(v, pattern) # Shape: (batch_size, query_pos, n_heads, d_head)
 
         return self.decode_z_with_W_O(z)
@@ -327,7 +327,7 @@ class LowRankSparseAttention(nn.Module):
         
         return top_k_out, top_k_indices
     
-    def cal_out_top_k_for_ov1(self, resid: torch.Tensor):
+    def cal_out_top_k_for_ov1(self, resid: torch.Tensor, filter_mask: torch.Tensor):
         q, k, v, pattern = self.cal_q_k_v_pattern(resid)
         
         # z: (batch_size, query_pos, n_heads, d_head)
@@ -340,6 +340,7 @@ class LowRankSparseAttention(nn.Module):
             else:
                 l1 = torch.abs(z.squeeze(-1)) * torch.norm(self.W_O, p=2, dim=2).view(1, 1, self.cfg.n_ov_heads)
             
+            # topk
             k_smallest = self.cfg.n_ov_heads - self.cfg.top_k + 1
 
             # top_k_values: (batch_size, query_pos)
@@ -347,6 +348,35 @@ class LowRankSparseAttention(nn.Module):
             
             # top_k_mask: (batch_size, query_pos, n_heads)
             top_k_mask = l1 >= top_k_values.unsqueeze(-1)
+
+            '''
+            # batch topk
+            k_smallest = (self.cfg.n_ov_heads - self.cfg.top_k) * filter_mask.numel() + 1
+
+            top_k_values, _ = torch.kthvalue(l1.contiguous().view(-1), k=k_smallest)
+
+            top_k_mask = l1 >= top_k_values
+            
+            # approximate batch topk
+            k_smallest = self.cfg.n_ov_heads - self.cfg.top_k + 1
+
+            # top_k_values: (batch_size, query_pos)
+            top_k_values, _ = torch.kthvalue(l1, k=k_smallest, dim=2)
+            
+            # top_k_mask: (batch_size, query_pos, n_heads)
+            top_k_mask = l1 >= top_k_values[filter_mask].median()
+
+            # sentence topk
+            k_smallest = filter_mask.sum(dim=-1) * (self.cfg.n_ov_heads - self.cfg.top_k) + 1
+
+            l1[~filter_mask] = float('-inf')
+
+            flat_l1 = l1.contiguous().view(l1.shape[0], -1)
+
+            top_k_values = torch.stack([flat_l1[i].kthvalue(k_smallest[i]).values for i in range(l1.shape[0])])
+
+            top_k_mask = l1 >= top_k_values.view(-1, 1, 1)
+            '''
 
         top_k_z = z * top_k_mask.unsqueeze(-1)
 
@@ -442,6 +472,7 @@ class LowRankSparseAttention(nn.Module):
 
         return torch.cat([x_rotated, x_pass], dim=-1)
 
+    '''
     def calculate_sin_cos_rotary(
         self,
         rotary_dim: int,
@@ -468,7 +499,59 @@ class LowRankSparseAttention(nn.Module):
         # Create a n_ctx x rotary_dim tensor, where each column is an arithmetic sequence of angles in that frequency
         angles = pos[:, None] / freq[None, :]
         return torch.sin(angles).to(dtype), torch.cos(angles).to(dtype)
+    '''
 
+    def calculate_sin_cos_rotary(
+        self,
+        rotary_dim: int,
+        n_ctx: int,
+        base: int = 10000,
+        dtype: torch.dtype = torch.float32,
+    ) -> Tuple[Float[torch.Tensor, "n_ctx rotary_dim"], Float[torch.Tensor, "n_ctx rotary_dim"]]:
+        """
+        Calculate the sine and cosine waves to use in a rotary embedding. See https://blog.eleuther.ai/rotary-embeddings/ for details
+
+        Note: For some inexplicable reason, in GPT-J each ADJACENT pair of elements in k and q are rotated, in GPT-NeoX the pair of elements at k and k+n//2 are rotated (ie folding the full length in half, and then looking at pairs accordingly). I have absolutely no clue why, it should be completely equivalent.
+        To resolve this, I've coded it to default to the GPT-J mode, but to explicitly check whether it's GPT-NeoX and then do the GPT-NeoX thing if it is.
+        """
+        high_precision = torch.float32 if dtype != torch.float64 else torch.float64
+        pos = torch.arange(n_ctx, dtype=high_precision)
+        dim = torch.arange(rotary_dim // 2, dtype=high_precision)
+
+        # Llama-3.1 uses NTK-by-Parts Rotary Embedding introduced in Section 3.2 in https://arxiv.org/pdf/2309.00071
+        # Implementation copied from https://github.com/huggingface/transformers/blob/v4.46.0/src/transformers/modeling_rope_utils.py#L310
+        if self.cfg.use_NTK_by_parts_rope:
+            inv_freq = 1.0 / (
+                base ** (torch.arange(0, rotary_dim, 2, dtype=torch.int64).float() / rotary_dim)
+            )
+            factor = self.cfg.NTK_by_parts_factor
+            low_freq_factor = self.cfg.NTK_by_parts_low_freq_factor
+            high_freq_factor = self.cfg.NTK_by_parts_high_freq_factor
+            old_context_len = self.cfg.old_context_len
+
+            low_freq_wavelen = old_context_len / low_freq_factor
+            high_freq_wavelen = old_context_len / high_freq_factor
+
+            wavelen = 2 * math.pi / inv_freq
+            inv_freq_llama = torch.where(wavelen > low_freq_wavelen, inv_freq / factor, inv_freq)
+            smooth_factor = (old_context_len / wavelen - low_freq_factor) / (
+                high_freq_factor - low_freq_factor
+            )
+            smoothed_inv_freq = (
+                1 - smooth_factor
+            ) * inv_freq_llama / factor + smooth_factor * inv_freq_llama
+            is_medium_freq = ~(wavelen < high_freq_wavelen) * ~(wavelen > low_freq_wavelen)
+            inv_freq_llama = torch.where(is_medium_freq, smoothed_inv_freq, inv_freq_llama)
+            freq = 1 / inv_freq_llama
+        else:
+            freq = base ** (dim / (rotary_dim / 2))
+        if self.cfg.rotary_adjacent_pairs:
+            freq = einops.repeat(freq, "d -> (d 2)")
+        else:
+            freq = einops.repeat(freq, "d -> (2 d)")
+        # Create a n_ctx x rotary_dim tensor, where each column is an arithmetic sequence of angles in that frequency
+        angles = pos[:, None] / freq[None, :]
+        return torch.sin(angles).to(dtype), torch.cos(angles).to(dtype)
 
     def apply_causal_mask(
         self,
@@ -504,6 +587,22 @@ class LowRankSparseAttention(nn.Module):
 
         return self
     
+    @torch.no_grad()
+    def rescale_parameters_for_expected_average_only_in(self):
+        input_scale_factor = torch.tensor(self.cfg.d_model, dtype=torch.float, device=self.cfg.device).sqrt() / self.cfg.avg_norm['in']
+        output_scale_factor = torch.tensor(self.cfg.d_model, dtype=torch.float, device=self.cfg.device).sqrt() / self.cfg.avg_norm['out']
+
+        self.W_V.data *= input_scale_factor
+
+        self.W_O.data /= output_scale_factor
+        self.b_O.data /= output_scale_factor                                                                                                    
+
+        self.W_Q.data *= input_scale_factor
+        
+        self.W_K.data *= input_scale_factor
+
+        return self
+    
     @classmethod
     def from_pretrained(cls, path: str, device: str | None = None):
         cfg = LorsaConfig.from_pretrained(path=path)
@@ -520,4 +619,6 @@ class LowRankSparseAttention(nn.Module):
         )
 
         lorsa.load_state_dict(state_dict)
+        lorsa.rescale_parameters_for_expected_average_only_in()
+
         return lorsa

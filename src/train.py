@@ -26,8 +26,8 @@ from activations import MultiKeyDataset, ActivationDataset, PresaveActivationDat
 
 from optim import LrWarmupScheduler, TopkWarmupScheduler
 
-def train_lorsa(lorsa: LowRankSparseAttention, model: HookedTransformer, cfg: LorsaTrainConfig, activation_dataset: ActivationDataset):
-    hook_in, hook_out, filter_mask = activation_dataset.next(batch_size=8 * cfg.batch_size)
+def train_lorsa(lorsa: LowRankSparseAttention, cfg: LorsaTrainConfig, activation_dataset: ActivationDataset):
+    hook_in, hook_out, filter_mask = activation_dataset.next(batch_size=cfg.buffer_size)
     hook_in, hook_out = lorsa.scale_norm(hook_in, hook_out)
     lorsa.initialize_parameters(b_O = hook_out[filter_mask].mean(dim=0).to(cfg.lorsa_config.dtype))
 
@@ -118,14 +118,26 @@ def train_lorsa(lorsa: LowRankSparseAttention, model: HookedTransformer, cfg: Lo
         # update tqdm bar
         pbar.update(filter_mask.sum().item()) 
         pbar.set_postfix({
-            "mse_loss": mse_loss.item(), 
+            "mse_loss": round(mse_loss.item(), 3), 
             "ev": round(explained_variance.mean().item(), 2), 
             **({'k': lorsa.cfg.top_k} if cfg.mode == 'top_k' else {}),
-            **({"l1": l1[filter_mask].sum(dim=-1).mean().item()} if cfg.mode == "top_k" or cfg.mode == "l1" else {})})
+            **({"l1": round(l1[filter_mask].sum(dim=-1).mean().item(), 1)} if cfg.mode == "top_k" or cfg.mode == "l1" else {}),
+        })
         pbar.refresh()
-        
+
         # log to wandb
         if cfg.log_to_wandb and step % cfg.log_frequency == 0:
+            W_V_norms = lorsa.W_V.data.view(lorsa.cfg.n_ov_heads, lorsa.cfg.d_model).norm(dim=1)
+            W_O_norms = lorsa.W_O.data.view(lorsa.cfg.n_ov_heads, lorsa.cfg.d_model).norm(dim=1)
+            mean_norm_W_V = W_V_norms.mean().item()
+            q1_norm_W_V = W_V_norms.kthvalue(k=(lorsa.cfg.n_ov_heads + 3) // 4).values.item()
+            median_norm_W_V = W_V_norms.median().item()
+            q3_norm_W_V = W_V_norms.kthvalue(k=3 * (lorsa.cfg.n_ov_heads + 1) // 4).values.item()
+            mean_norm_W_O = W_O_norms.mean().item()
+            q1_norm_W_O = W_O_norms.kthvalue(k=(lorsa.cfg.n_ov_heads + 3) // 4).values.item()
+            median_norm_W_O = W_O_norms.median().item()
+            q3_norm_W_O = W_O_norms.kthvalue(k=3 * (lorsa.cfg.n_ov_heads + 1) // 4).values.item()
+
             log_dict = {"details/sampled_tokens": sampled_tokens,
                         "details/learning_rate": lr_scheduler.get_lr(),
                         "loss/mse_loss": mse_loss.item(), 
@@ -136,6 +148,14 @@ def train_lorsa(lorsa: LowRankSparseAttention, model: HookedTransformer, cfg: Lo
                         "metrics/error_norm": torch.mean(torch.norm(out[filter_mask] - hook_out[filter_mask], p=2, dim=-1)).item(),
                         "metrics/b_O_norm": torch.norm(lorsa.b_O.data, p=2, dim=-1).item(),
                         "metrics/grad_norm": grad_norm.item(),
+                        "metrics/W_V_norm_Third_quartile": q3_norm_W_V,
+                        "metrics/W_V_norm_Median": median_norm_W_V,
+                        "metrics/W_V_norm_First_quartile": q1_norm_W_V,
+                        "metrics/W_V_norm_Mean": mean_norm_W_V,
+                        "metrics/W_O_norm_Third_quartile": q3_norm_W_O,
+                        "metrics/W_O_norm_Median": median_norm_W_O,
+                        "metrics/W_O_norm_First_quartile": q1_norm_W_O,
+                        "metrics/W_O_norm_Mean": mean_norm_W_O,
                         **({"sparsity/below 1e-5": (head_use_count / tokens_count < 1e-5).sum().item()} if cfg.mode == "top_k" and tokens_count > 1e5 else {}),
                         **({"sparsity/below 1e-6": (head_use_count / tokens_count < 1e-6).sum().item()} if cfg.mode == "top_k" and tokens_count > 1e6 else {}),
                         **({"sparsity/top_k": lorsa.cfg.top_k} if cfg.mode == "top_k" else {}),

@@ -4,7 +4,7 @@ import math
 import torch
 from torch.utils.data import DataLoader
 
-from transformers import GPTNeoXForCausalLM, GPTNeoXTokenizerFast
+from transformers import GPTNeoXForCausalLM, GPTNeoXTokenizerFast, AutoTokenizer, AutoModelForCausalLM
 
 from transformer_lens import HookedTransformer
 
@@ -19,32 +19,31 @@ import wandb
 import copy
 
 def train_lorsa_runner(cfg: LorsaTrainConfig):
-    # load model
-    hf_model = GPTNeoXForCausalLM.from_pretrained(
-        cfg.model, 
-        local_files_only=True
-    )
-    tokenizer = GPTNeoXTokenizerFast.from_pretrained(
-        cfg.model, 
-        local_files_only=True
-    )
-
-    model = HookedTransformer.from_pretrained_no_processing(
-        cfg.model_name, 
-        use_flash_attn=True, 
-        hf_model=hf_model,
-        hf_config=hf_model.config,
-        tokenizer=tokenizer,
-        device=cfg.lorsa_config.device,
-        dtype=cfg.lorsa_config.dtype,
-    )
-    model.offload_params_after(f'blocks.{cfg.layer}.hook_attn_out', torch.tensor([[0]], device=cfg.lorsa_config.device))
-    model.eval()
-    for param in model.parameters():
-        param.requires_grad = False
-    
     # load activation dataset
     if cfg.dataset_type == 'text':
+        # load model
+        hf_model = AutoModelForCausalLM.from_pretrained(
+            cfg.model, 
+            local_files_only=True
+        )
+        tokenizer = AutoTokenizer.from_pretrained(
+            cfg.model, 
+            local_files_only=True
+        )
+
+        model = HookedTransformer.from_pretrained_no_processing(
+            cfg.model_name, 
+            use_flash_attn=True, 
+            hf_model=hf_model,
+            hf_config=hf_model.config,
+            tokenizer=tokenizer,
+            device=cfg.lorsa_config.device,
+            dtype=cfg.lorsa_config.dtype,
+        )
+        model.offload_params_after(f'blocks.{cfg.layer}.hook_attn_out', torch.tensor([[0]], device=cfg.lorsa_config.device))
+        model.eval()
+        for param in model.parameters():
+            param.requires_grad = False
         activation_dataset = TextActivationDataset(cfg=cfg, model=model)
     elif cfg.dataset_type == 'activation':
         activation_dataset = PresaveActivationDataset(cfg=cfg)
@@ -81,7 +80,6 @@ def train_lorsa_runner(cfg: LorsaTrainConfig):
     # train lorsa
     lorsa = train_lorsa(
         lorsa=lorsa,
-        model=model,
         cfg=cfg,
         activation_dataset=activation_dataset,
     )
@@ -107,3 +105,4 @@ def analyze_lorsa_runner(cfg: LorsaAnalyzeConfig):
         activation_dataset = PresaveActivationDataset(cfg=cfg)
     else:
         raise ValueError(f"Unknown dataset type: {cfg.dataset_type}")
+

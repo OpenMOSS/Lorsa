@@ -43,6 +43,11 @@ class LorsaConfig:
     rotary_dim: Optional[int] = None
     rotary_base: Optional[int] = 10000
     rotary_adjacent_pairs: Optional[bool] = False
+    use_NTK_by_parts_rope: bool = False
+    NTK_by_parts_low_freq_factor: Optional[float] = None
+    NTK_by_parts_high_freq_factor: Optional[float] = None
+    NTK_by_parts_factor: Optional[float] = None
+    old_context_len: Optional[int] = None
 
     def update_from_model_config(self, model_cfg: HookedTransformerConfig):
         self.d_model = model_cfg.d_model
@@ -50,6 +55,12 @@ class LorsaConfig:
         self.positional_embedding_type = model_cfg.positional_embedding_type
         self.rotary_base = model_cfg.rotary_base
         self.rotary_adjacent_pairs = model_cfg.rotary_adjacent_pairs
+        self.use_NTK_by_parts_rope = model_cfg.use_NTK_by_parts_rope
+        if self.use_NTK_by_parts_rope:
+            self.NTK_by_parts_low_freq_factor = model_cfg.NTK_by_parts_low_freq_factor
+            self.NTK_by_parts_high_freq_factor = model_cfg.NTK_by_parts_high_freq_factor
+            self.NTK_by_parts_factor = model_cfg.NTK_by_parts_factor
+            self.old_context_len = model_cfg.old_context_len
     
     def to_dict(self) -> Dict[str, Any]:
         return {field.name: getattr(self, field.name) for field in fields(self)}
@@ -88,7 +99,7 @@ class LorsaConfig:
     def __post_init__(self):
         if self.n_ov_heads % self.n_qk_heads != 0:
             raise ValueError("n_ov_heads must be divisible by n_qk_heads")
-        if self.top_k > self.n_ov_heads:
+        if self.top_k and self.top_k > self.n_ov_heads:
             raise ValueError("top_k must be less than or equal to n_ov_heads")
 
 @dataclass(kw_only=True)
@@ -168,6 +179,29 @@ class LorsaTrainConfig:
 
         self.update_lorsa_cfg_with_model_cfg()
 
+
+@dataclass(kw_only=True)
+class LorsaEvaluateConfig:
+    # lorsa config
+    lorsa_dir: str
+    lorsa_config: LorsaConfig
+    
+    # dataset config
+    dataset_path: str
+    dataset_type: Literal["text", "activation"]
+    num_workers: int
+    prefetch_factor: int
+    lm_batch_size: int
+    buffer_size: int
+    
+    # evaluating config
+    batch_size: int
+    total_tokens: int
+    
+    # orig attention head config
+    model_name: str = None
+    layer: int
+    prepend_bos: bool = None
 
 @dataclass(kw_only=True)
 class LorsaAnalyzeConfig:

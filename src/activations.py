@@ -38,7 +38,7 @@ class ActivationDataset():
     
     @torch.no_grad()
     def cal_norm(self):
-        hook_in, hook_out, filter_mask = self.next(batch_size = 8 * self.cfg.batch_size)
+        hook_in, hook_out, filter_mask = self.next(batch_size = self.cfg.buffer_size)
         hook_in_norm = hook_in[filter_mask].norm(p=2, dim=1).mean().item()
         hook_out_norm = hook_out[filter_mask].norm(p=2, dim=1).mean().item()
         print(f"Average input activation norm: {hook_in_norm}\nAverage output activation norm: {hook_out_norm}")
@@ -61,12 +61,16 @@ class ActivationDataset():
     
 class TextActivationDataset(ActivationDataset):
     def __init__(self, cfg: LorsaTrainConfig, model: HookedTransformer):
-        dataset = load_from_disk(cfg.dataset_path)
         self.hook_in_name = f'blocks.{cfg.layer}.ln1.hook_normalized'
         self.hook_out_name = f'blocks.{cfg.layer}.hook_attn_out'
         self.model = model
         self.cfg = cfg
-        self.dataloader = DataLoader(dataset['text'], batch_size=cfg.lm_batch_size, num_workers=cfg.num_workers)
+        dataset = load_from_disk(cfg.dataset_path)
+        filtered_dataset = dataset.filter(
+            lambda example: len(tokenizer.encode(example['text'])) >= cfg.n_ctx,
+            num_proc = cfg.num_proc,
+        )
+        self.dataloader = DataLoader(filtered_dataset['text'], batch_size=cfg.lm_batch_size, num_workers=cfg.num_workers)
         self.data_iter = iter(self.dataloader)
         self.act_buffer = {
             'input': torch.empty(self.cfg.buffer_size, self.cfg.lorsa_config.n_ctx, self.cfg.lorsa_config.d_model, dtype=self.cfg.lorsa_config.dtype, device=self.cfg.lorsa_config.device),
