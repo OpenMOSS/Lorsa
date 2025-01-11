@@ -10,24 +10,6 @@ export type Sample = z.infer<typeof SampleSchema>;
 
 export const InterpretationSchema = z.object({
   text: z.string(),
-  validation: z.array(
-    z.object({
-      method: z.string(),
-      passed: z.boolean(),
-      detail: z
-        .object({
-          prompt: z.string(),
-          response: z.string(),
-        })
-        .optional(),
-    })
-  ),
-  detail: z
-    .object({
-      prompt: z.string(),
-      response: z.string(),
-    })
-    .optional(),
 });
 
 export type Interpretation = z.infer<typeof InterpretationSchema>;
