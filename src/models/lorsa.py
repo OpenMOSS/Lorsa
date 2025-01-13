@@ -327,7 +327,7 @@ class LowRankSparseAttention(nn.Module):
         
         return top_k_out, top_k_indices
     
-    def cal_out_top_k_for_ov1(self, resid: torch.Tensor, filter_mask: torch.Tensor):
+    def cal_out_top_k_for_ov1(self, resid: torch.Tensor):
         q, k, v, pattern = self.cal_q_k_v_pattern(resid)
         
         # z: (batch_size, query_pos, n_heads, d_head)
