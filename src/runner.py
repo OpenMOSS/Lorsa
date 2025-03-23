@@ -44,7 +44,7 @@ def train_lorsa_runner(cfg: LorsaTrainConfig):
         model.eval()
         for param in model.parameters():
             param.requires_grad = False
-        activation_dataset = TextActivationDataset(cfg=cfg, model=model)
+        activation_dataset = TextActivationDataset(cfg=cfg, model=model, tokenizer=tokenizer)
     elif cfg.dataset_type == 'activation':
         activation_dataset = PresaveActivationDataset(cfg=cfg)
     else:

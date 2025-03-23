@@ -60,15 +60,15 @@ class ActivationDataset():
 
     
 class TextActivationDataset(ActivationDataset):
-    def __init__(self, cfg: LorsaTrainConfig, model: HookedTransformer):
+    def __init__(self, cfg: LorsaTrainConfig, model: HookedTransformer, tokenizer):
         self.hook_in_name = f'blocks.{cfg.layer}.ln1.hook_normalized'
         self.hook_out_name = f'blocks.{cfg.layer}.hook_attn_out'
         self.model = model
         self.cfg = cfg
         dataset = load_from_disk(cfg.dataset_path)
         filtered_dataset = dataset.filter(
-            lambda example: len(tokenizer.encode(example['text'])) >= cfg.n_ctx,
-            num_proc = cfg.num_proc,
+            lambda example: len(tokenizer.encode(example['text'], max_length=cfg.lorsa_config.n_ctx, truncation=True)) >= cfg.lorsa_config.n_ctx,
+            num_proc = cfg.num_workers,
         )
         self.dataloader = DataLoader(filtered_dataset['text'], batch_size=cfg.lm_batch_size, num_workers=cfg.num_workers)
         self.data_iter = iter(self.dataloader)
