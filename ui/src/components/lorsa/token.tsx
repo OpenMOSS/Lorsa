@@ -19,9 +19,7 @@ export const TokenInfo = ({ token, maxHeadAct, position }: TokenInfoProps) => {
       <div className="text-sm font-bold">Position:</div>
       <div className="text-sm">{position}</div>
       <div className="text-sm font-bold">Activation:</div>
-      <div className={cn("text-sm", getAccentClassname(token.headAct, maxHeadAct, "text"))}>
-        {token.headAct.toFixed(3)}
-      </div>
+      <div className="text-sm">{token.headAct.toFixed(3)}</div>
     </div>
   );
 };
@@ -31,23 +29,51 @@ export type SuperTokenProps = {
   position: number;
   maxHeadAct: number;
   sampleMaxHeadAct: number;
+  selectedDfa: number[] | null;
+  onHoverStart: () => void;
+  onHoverEnd: () => void;
 };
 
-export const SuperToken = ({ tokens, position, maxHeadAct, sampleMaxHeadAct }: SuperTokenProps) => {
-  const displayText = tokens.map(token => token.token).join("")
+const getDfaColor = (value: number) => {
+  if (value === 0) return "";
+  const opacity = Math.min(Math.floor(value * 1000), 90);
+  const validOpacity = Math.max(0, Math.floor(opacity / 10) * 10);
+  return `bg-green-500/${validOpacity}`;
+};
 
+export const SuperToken = ({
+  tokens,
+  position,
+  maxHeadAct,
+  sampleMaxHeadAct,
+  selectedDfa,
+  onHoverStart,
+  onHoverEnd
+}: SuperTokenProps) => {
+  const displayText = tokens.map(token => token.token).join("");
   const superTokenMaxHeadAct = Math.max(...tokens.map((t) => t.headAct));
 
   const SuperTokenInner = () => {
+    const baseIndex = tokens[0].originalIndex;
+    
     return (
       <span
         className={cn(
           "underline decoration-slate-400 decoration-1 decoration-dotted underline-offset-[6px]",
           superTokenMaxHeadAct > 0 && "hover:shadow-lg hover:text-gray-600 cursor-pointer",
-          sampleMaxHeadAct > 0 && superTokenMaxHeadAct == sampleMaxHeadAct && "font-bold",
-          getAccentClassname(superTokenMaxHeadAct, maxHeadAct, "bg"),
+          sampleMaxHeadAct > 0 && superTokenMaxHeadAct === sampleMaxHeadAct && "font-bold",
+          
+          !selectedDfa && getAccentClassname(superTokenMaxHeadAct, maxHeadAct, "bg"),
+          ...tokens.map((token, i) => {
+            const globalIndex = baseIndex + i;
+            return selectedDfa?.[globalIndex] !== undefined 
+              ? getDfaColor(selectedDfa[globalIndex])
+              : "";
+          }),
           tokens.some((t) => t.isQPosition) && "bg-green-500"
         )}
+        onMouseEnter={onHoverStart}
+        onMouseLeave={onHoverEnd}
       >
         {displayText}
       </span>
@@ -60,12 +86,14 @@ export const SuperToken = ({ tokens, position, maxHeadAct, sampleMaxHeadAct }: S
 
   return (
     <HoverCard>
-      <HoverCardTrigger>
+      <HoverCardTrigger onMouseEnter={onHoverStart} onMouseLeave={onHoverEnd}>
         <SuperTokenInner />
       </HoverCardTrigger>
       <HoverCardContent className="w-[300px] text-wrap flex flex-col gap-4">
         {tokens.length > 1 && (
-          <div className="text-sm font-bold">This super token is composed of the {tokens.length} tokens below:</div>
+          <div className="text-sm font-bold">
+            This super token is composed of the {tokens.length} tokens below:
+          </div>
         )}
         {tokens.map((token, i) => (
           <Fragment key={i}>
