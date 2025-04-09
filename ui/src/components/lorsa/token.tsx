@@ -80,6 +80,8 @@ export const SuperToken = ({
     );
   };
 
+  return <SuperTokenInner />;
+  
   if (superTokenMaxHeadAct === 0) {
     return <SuperTokenInner />;
   }
