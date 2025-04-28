@@ -37,29 +37,31 @@ export type HeadActivationSampleProps = {
 };
 
 export const HeadActivationSample = ({ sample, sampleName, maxHeadAct }: HeadActivationSampleProps) => {
+  const [selectedDfa, setSelectedDfa] = useState<number[] | null>(null);
   const sampleMaxHeadAct = Math.max(...sample.headActs);
 
   const start = Math.max(0);
   const end = Math.min(sample.context.length);
 
-  // console.log(sample)
+  // 添加 originalIndex 记录原始位置
   const tokens = sample.context.slice(start, end).map((token, i) => ({
     token,
     headAct: sample.headActs[start + i],
-    isQPosition: sample.qPosition === start + i,
+    dfa: sample.dfa[start + i],
+    isQPosition: false,
+    originalIndex: start + i,
   }));
 
-  // console.log(tokens)
+  console.log(tokens)
 
   const [tokenGroups, _] = tokens.reduce<[Token[][], Token[]]>(
     ([groups, currentGroup], token) => {
       const newGroup = [...currentGroup, token];
       try {
-        // Attempt to decode the concatenated strings
         const decoded = decodeURIComponent(escape(newGroup.join('')));
-        return [[...groups, newGroup], []]; // Successfully decoded, finalize the group
+        return [[...groups, newGroup], []];
       } catch {
-        return [groups, newGroup]; // Decoding failed, continue adding to the current group
+        return [groups, newGroup];
       }
     },
     [[], []]
@@ -105,6 +107,9 @@ export const HeadActivationSample = ({ sample, sampleName, maxHeadAct }: HeadAct
     [0]
   );
 
+  const handleHoverStart = (dfaArray: number[]) => setSelectedDfa(dfaArray);
+  const handleHoverEnd = () => setSelectedDfa(null);
+
   return (
     <div>
       <Accordion type="single" collapsible>
@@ -120,6 +125,9 @@ export const HeadActivationSample = ({ sample, sampleName, maxHeadAct }: HeadAct
                   position={tokenGroupPositionsTrigger[i]}
                   maxHeadAct={maxHeadAct}
                   sampleMaxHeadAct={sampleMaxHeadAct}
+                  selectedDfa={selectedDfa}
+                  onHoverStart={() => handleHoverStart(tokens[0].dfa)}
+                  onHoverEnd={handleHoverEnd}
                 />
               ))}
               {endTrigger != 0 && <span className="text-sky-300"> ...</span>}
@@ -133,6 +141,9 @@ export const HeadActivationSample = ({ sample, sampleName, maxHeadAct }: HeadAct
                 position={tokenGroupPositions[i]}
                 maxHeadAct={maxHeadAct}
                 sampleMaxHeadAct={sampleMaxHeadAct}
+                selectedDfa={selectedDfa}
+                onHoverStart={() => handleHoverStart(tokens[0].dfa)}
+                onHoverEnd={handleHoverEnd}
               />
             ))}
           </AccordionContent>
