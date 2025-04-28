@@ -31,6 +31,7 @@ class MultiKeyDataset(torch.utils.data.Dataset):
 class ActivationDataset():
     def __init__(self, cfg: LorsaTrainConfig, model: HookedTransformer):
         self.hook_in_name = f'blocks.{cfg.layer}.ln1.hook_normalized'
+        # self.hook_in_name = f'blocks.{cfg.layer}.hook_resid_pre'
         self.hook_out_name = f'blocks.{cfg.layer}.hook_attn_out'
         self.model = model
         self.cfg = cfg
@@ -62,6 +63,7 @@ class ActivationDataset():
 class TextActivationDataset(ActivationDataset):
     def __init__(self, cfg: LorsaTrainConfig, model: HookedTransformer, tokenizer):
         self.hook_in_name = f'blocks.{cfg.layer}.ln1.hook_normalized'
+        # self.hook_in_name = f'blocks.{cfg.layer}.hook_resid_pre'
         self.hook_out_name = f'blocks.{cfg.layer}.hook_attn_out'
         self.model = model
         self.cfg = cfg
@@ -105,6 +107,7 @@ class PresaveLoadingDataset(torch.utils.data.Dataset):
         Initialize the dataset with file paths and configuration.
         """
         self.hook_in_name = f'blocks.{cfg.layer}.ln1.hook_normalized'
+        # self.hook_in_name = f'blocks.{cfg.layer}.hook_resid_pre'
         self.hook_out_name = f'blocks.{cfg.layer}.hook_attn_out'
         
         self.cfg = cfg

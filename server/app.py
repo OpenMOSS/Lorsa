@@ -41,8 +41,9 @@ dataset_cache: dict[str, Dataset] = {}
 
 def get_model(lorsa_name: str) -> HookedTransformer:
     MODEL_PATH = {
-        'EleutherAI/pythia-160m': '/inspire/hdd/ws-8207e9e2-e733-4eec-a475-cfa1c36480ba/embodied-multimodality/public/zfhe/models/pythia-160m',
         "meta-llama/Llama-3.1-8B": "/inspire/hdd/ws-8207e9e2-e733-4eec-a475-cfa1c36480ba/embodied-multimodality/public/zfhe/models/Llama-3.1-8B",
+        "EleutherAI/pythia-160m": "/inspire/hdd/ws-8207e9e2-e733-4eec-a475-cfa1c36480ba/embodied-multimodality/public/zfhe/models/pythia-160m",
+        "NeelNanda/GELU_2L512W_C4_Code": "/inspire/hdd/ws-8207e9e2-e733-4eec-a475-cfa1c36480ba/embodied-multimodality/public/zfhe/models/GELU_2L512W_C4_Code",
     }
     
     path = f"{result_dir}/{lorsa_name}"
@@ -51,24 +52,37 @@ def get_model(lorsa_name: str) -> HookedTransformer:
     model_path = MODEL_PATH[cfg.model_name]
 
     if (cfg.model_name, model_path) not in lm_cache:
-        hf_model = AutoModelForCausalLM.from_pretrained(
-            model_path, 
-            local_files_only=True,
-        ).to(device)
-        tokenizer = AutoTokenizer.from_pretrained(
-            model_path, 
-            local_files_only=True,
-        )
+        if cfg.model_name.startswith("NeelNanda"):
+            tokenizer = AutoTokenizer.from_pretrained(
+                model_path,
+                local_files_only=True,
+            )
+            model = HookedTransformer.from_pretrained_no_processing(
+                cfg.model_name,
+                use_flash_attn=True, 
+                tokenizer=tokenizer,
+                device=device,
+                dtype=cfg.dtype,
+            )
+        else:
+            hf_model = AutoModelForCausalLM.from_pretrained(
+                model_path, 
+                local_files_only=True,
+            ).to(device)
+            tokenizer = AutoTokenizer.from_pretrained(
+                model_path, 
+                local_files_only=True,
+            )
 
-        model = HookedTransformer.from_pretrained_no_processing(
-            cfg.model_name, 
-            use_flash_attn=True, 
-            hf_model=hf_model,
-            hf_config=hf_model.config,
-            tokenizer=tokenizer,
-            device=device,
-            dtype=cfg.dtype,
-        )
+            model = HookedTransformer.from_pretrained_no_processing(
+                cfg.model_name, 
+                use_flash_attn=True, 
+                hf_model=hf_model,
+                hf_config=hf_model.config,
+                tokenizer=tokenizer,
+                device=device,
+                dtype=cfg.dtype,
+            )
         lm_cache[(cfg.model_name, model_path)] = model
     return lm_cache[(cfg.model_name, model_path)]
 
@@ -106,34 +120,44 @@ async def oom_error_handler(request, exc):
 
 def pack_text_and_dfa(
     text: List[str], 
-    dfa: Float[torch.Tensor, "batch context_len"],
-    qpos: Float[torch.Tensor, "batch"],
+    dfa: Float[torch.Tensor, "batch context_len context_len"],
+    z: Float[torch.Tensor, "batch context_len"],
     model: HookedTransformer,
 ):
     result = []
     assert len(text) == dfa.size(0)
     max_context_len = dfa.size(1)
-    for sentence, single_sentence_dfa, single_text_qpos in zip(text, dfa, qpos):
+    for sentence, single_sentence_dfa, single_sentence_z in zip(text, dfa, z):
         tokens = model.to_str_tokens(sentence)[:max_context_len]
         actual_context_len = len(tokens)
 
-        single_sentence_dfa = single_sentence_dfa[:actual_context_len]
+        single_sentence_dfa = single_sentence_dfa[:actual_context_len,:actual_context_len]
+        single_sentence_z = single_sentence_z[:actual_context_len]
 
+        """
         indices = (single_sentence_dfa == 0.).nonzero(as_tuple=True)[0]
         if indices.numel() > 0:
             q_position = indices[0].item()
         else:
             q_position = actual_context_len
 
-        small_value_threshold = 0.001 * single_sentence_dfa.max().item()
+        dfa_small_value_threshold = 0.001 * single_sentence_dfa.max().item()
         single_sentence_dfa = torch.where(
-            single_sentence_dfa < small_value_threshold,
+            single_sentence_dfa < dfa_small_value_threshold,
             0.,
             single_sentence_dfa
         )
 
+        z_small_value_threshold = 0.001 * single_sentence_z.max().item()
+        single_sentence_z = torch.where(
+            single_sentence_z < z_small_value_threshold,
+            0.,
+            single_sentence_z
+        )
+        """
+
         result.append(
-            {'context': tokens, 'head_acts': single_sentence_dfa, 'q_position': single_text_qpos.item()}
+            {'context': tokens, 'head_acts': single_sentence_z, 'dfa': single_sentence_dfa}
         )
 
     return result
@@ -172,7 +196,7 @@ def get_head(lorsa_name: str, head_index: str | int):
                         sample_results['context_idx'][head_index].cpu().numpy().tolist()
                     )['text'],
                     dfa=sample_results['dfa_of_max_activating_samples'][head_index],
-                    qpos=sample_results['q_pos_of_max_activating_samples'][head_index],
+                    z=sample_results['z_of_max_activating_samples'][head_index],
                     model=model,
                 ),
                 'act_times': sample_results['act_times'][head_index].item(),

@@ -123,12 +123,23 @@ class LowRankSparseAttention(nn.Module):
                 setattr(self, param_name, nn.Parameter(param_value, requires_grad=True))
             else:
                 raise ValueError(f"Invalid parameter name: {param_name}. Allowed names are: {allowed_params}")
+    
+    def set_requires_grad(self, param_name, requires_grad=True):
+        for name, param in self.named_parameters():
+            if name == param_name:
+                param.requires_grad = requires_grad
+                print(f"Set requires_grad={requires_grad} for {name}")
+                return
+        raise ValueError(f"Parameter '{param_name}' not found in model.")
 
-    def scale_parameters(self, scale: float):
-        self.W_Q.data *= scale
-        self.W_K.data *= scale
-        self.W_V.data *= scale
-        # self.W_O.data *= scale
+    @torch.no_grad()
+    def scale_parameters(self, param_name, scale: float):
+        for name, param in self.named_parameters():
+            if name == param_name:
+                param.data *= scale
+                print(f"Set {name} to {scale} times")
+                return
+        raise ValueError(f"Parameter '{param_name}' not found in model.")
     
     def cal_q_k_v(self, resid: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         q = F.linear(resid,
@@ -336,7 +347,7 @@ class LowRankSparseAttention(nn.Module):
         with torch.no_grad():
             # l1: (batch_size, query_pos, n_heads)
             if self.cfg.use_z_relu:
-                l1 = F.relu(z.squeeze(-1)) * torch.norm(self.W_O, p=2, dim=2).view(1, 1, self.cfg.n_ov_heads)
+                l1 = torch.nn.functional.relu(z.squeeze(-1)) * torch.norm(self.W_O, p=2, dim=2).view(1, 1, self.cfg.n_ov_heads)
             else:
                 l1 = torch.abs(z.squeeze(-1)) * torch.norm(self.W_O, p=2, dim=2).view(1, 1, self.cfg.n_ov_heads)
             
@@ -570,12 +581,12 @@ class LowRankSparseAttention(nn.Module):
         return torch.where(final_mask, attn_scores, self.IGNORE)
 
     def scale_norm(
-        self, 
-        hook_in: Float[torch.Tensor, "batch seq_len d_model"], 
+        self,
+        hook_in: Float[torch.Tensor, "batch seq_len d_model"],
         hook_out: Float[torch.Tensor, "batch seq_len d_model"]
     ):
         hook_in = hook_in * math.sqrt(self.cfg.d_model) / self.cfg.avg_norm['in']
-        hook_out = hook_out * math.sqrt(self.cfg.d_model) / self.cfg.avg_norm['out']
+        hook_out = hook_out * math.sqrt(self.cfg.d_model) / self.cfg.avg_norm['out'] #TODO! 这里的hook_out经过了scale_norm,尺度和SAE的重构就不一样了，需要重新搞一下MSE
         return hook_in, hook_out
     
     @torch.no_grad()
@@ -604,7 +615,7 @@ class LowRankSparseAttention(nn.Module):
         return self
     
     @classmethod
-    def from_pretrained(cls, path: str, device: str | None = None):
+    def from_pretrained(cls, path: str, device: str | None = None, dtype = None):
         cfg = LorsaConfig.from_pretrained(path=path)
         device = cfg.device if device is None else device
         
@@ -620,5 +631,10 @@ class LowRankSparseAttention(nn.Module):
 
         lorsa.load_state_dict(state_dict)
         lorsa.rescale_parameters_for_expected_average_only_in()
+
+        if dtype is not None:
+            lorsa.cfg.dtype=dtype
+            lorsa.to(dtype)
+            torch.cuda.empty_cache()
 
         return lorsa

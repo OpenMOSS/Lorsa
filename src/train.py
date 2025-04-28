@@ -50,7 +50,14 @@ def train_lorsa(lorsa: LowRankSparseAttention, cfg: LorsaTrainConfig, activation
             elif cfg.mode == "default":
                 out = lorsa.forward(hook_in)
             
-            lorsa.scale_parameters(scale=torch.mean(torch.norm(hook_out[filter_mask]-lorsa.b_O, p=2, dim=-1)) / torch.mean(torch.norm(out[filter_mask]-lorsa.b_O, p=2, dim=-1)))
+            scale = torch.mean(torch.norm(hook_out[filter_mask]-lorsa.b_O, p=2, dim=-1)) / torch.mean(torch.norm(out[filter_mask]-lorsa.b_O, p=2, dim=-1))
+            if cfg.init_qk_with_orig_qk == False:
+                lorsa.scale_parameters('W_Q', scale=scale)
+                lorsa.scale_parameters('b_Q', scale=scale)
+                lorsa.scale_parameters('W_K', scale=scale)
+                lorsa.scale_parameters('b_K', scale=scale)
+            lorsa.scale_parameters('W_V', scale=scale)
+            lorsa.scale_parameters('b_V', scale=scale)
     
     # train loop
     pbar = tqdm(total=cfg.total_tokens, desc="Training Progress", unit="tokens", dynamic_ncols=True)
@@ -111,7 +118,7 @@ def train_lorsa(lorsa: LowRankSparseAttention, cfg: LorsaTrainConfig, activation
                 (out[filter_mask] - hook_out[filter_mask]).pow(2).sum(dim=-1)
             )
             total_variance = (
-                (out[filter_mask] - out[filter_mask].mean(0)).pow(2).sum(dim=-1)
+                (hook_out[filter_mask] - hook_out[filter_mask].mean(0)).pow(2).sum(dim=-1)
             )
             explained_variance = 1 - per_token_l2_loss / total_variance
 

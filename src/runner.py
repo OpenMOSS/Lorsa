@@ -19,31 +19,31 @@ import wandb
 import copy
 
 def train_lorsa_runner(cfg: LorsaTrainConfig):
+    # load model
+    hf_model = AutoModelForCausalLM.from_pretrained(
+        cfg.model, 
+        local_files_only=True
+    )
+    tokenizer = AutoTokenizer.from_pretrained(
+        cfg.model, 
+        local_files_only=True
+    )
+
+    model = HookedTransformer.from_pretrained_no_processing(
+        cfg.model_name, 
+        use_flash_attn=True, 
+        hf_model=hf_model,
+        hf_config=hf_model.config,
+        tokenizer=tokenizer,
+        device=cfg.lorsa_config.device,
+        dtype=cfg.lorsa_config.dtype,
+    )
+    model.offload_params_after(f'blocks.{cfg.layer}.hook_attn_out', torch.tensor([[0]], device=cfg.lorsa_config.device))
+    model.eval()
+    for param in model.parameters():
+        param.requires_grad = False
     # load activation dataset
     if cfg.dataset_type == 'text':
-        # load model
-        hf_model = AutoModelForCausalLM.from_pretrained(
-            cfg.model, 
-            local_files_only=True
-        )
-        tokenizer = AutoTokenizer.from_pretrained(
-            cfg.model, 
-            local_files_only=True
-        )
-
-        model = HookedTransformer.from_pretrained_no_processing(
-            cfg.model_name, 
-            use_flash_attn=True, 
-            hf_model=hf_model,
-            hf_config=hf_model.config,
-            tokenizer=tokenizer,
-            device=cfg.lorsa_config.device,
-            dtype=cfg.lorsa_config.dtype,
-        )
-        model.offload_params_after(f'blocks.{cfg.layer}.hook_attn_out', torch.tensor([[0]], device=cfg.lorsa_config.device))
-        model.eval()
-        for param in model.parameters():
-            param.requires_grad = False
         activation_dataset = TextActivationDataset(cfg=cfg, model=model, tokenizer=tokenizer)
     elif cfg.dataset_type == 'activation':
         activation_dataset = PresaveActivationDataset(cfg=cfg)
@@ -54,10 +54,24 @@ def train_lorsa_runner(cfg: LorsaTrainConfig):
 
     cfg.lorsa_config.save_config(save_path=cfg.result_dir)
 
-    # orig_attn = model.blocks[cfg.layer].attn
+    orig_attn = model.blocks[cfg.layer].attn
     
     lorsa = LowRankSparseAttention(cfg.lorsa_config).to(cfg.lorsa_config.device, non_blocking=True)
-    
+
+    if cfg.init_qk_with_orig_qk == True:
+        lorsa.initialize_parameters(
+            W_Q = orig_attn.W_Q.repeat(lorsa.cfg.n_qk_heads // orig_attn.cfg.n_heads, 1, 1) * lorsa.cfg.avg_norm['in'] / math.sqrt(lorsa.cfg.d_model),
+            b_Q = orig_attn.b_Q.repeat(lorsa.cfg.n_qk_heads // orig_attn.cfg.n_heads, 1),
+            W_K = orig_attn.W_K.repeat(lorsa.cfg.n_qk_heads // orig_attn.cfg.n_heads, 1, 1) * lorsa.cfg.avg_norm['in'] / math.sqrt(lorsa.cfg.d_model),
+            b_K = orig_attn.b_K.repeat(lorsa.cfg.n_qk_heads // orig_attn.cfg.n_heads, 1),
+        )
+        print('init lorsa qk parameters using orig qk')
+        if cfg.fix_qk == True:
+            lorsa.set_requires_grad('W_Q', requires_grad=False)
+            lorsa.set_requires_grad('b_Q', requires_grad=False)
+            lorsa.set_requires_grad('W_K', requires_grad=False)
+            lorsa.set_requires_grad('b_K', requires_grad=False)
+
     # lorsa.initialize_parameters(b_O = orig_attn.b_O.data.clone().detach().to(cfg.lorsa_config.dtype) * math.sqrt(cfg.lorsa_config.d_model) / activation_dataset.avg_norm['out'])
 
     # init wandb

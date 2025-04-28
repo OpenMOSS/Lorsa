@@ -5,8 +5,8 @@ import os
 import json
 import torch
 
-from transformers import AutoConfig
-from transformer_lens import HookedTransformerConfig
+from transformers import AutoConfig, AutoTokenizer
+from transformer_lens import HookedTransformerConfig, HookedTransformer
 from transformer_lens.loading_from_pretrained import convert_hf_model_config
 
 from utils.misc import (
@@ -106,6 +106,10 @@ class LorsaConfig:
 class LorsaTrainConfig:
     # lorsa config
     lorsa_config: LorsaConfig
+
+    # init config
+    init_qk_with_orig_qk: bool = False
+    fix_qk: bool = False
     
     # dataset config
     dataset_path: str
@@ -152,13 +156,27 @@ class LorsaTrainConfig:
     result_dir: str
 
     def update_lorsa_cfg_with_model_cfg(self):
-        hf_config = AutoConfig.from_pretrained(
-            self.model if self.model is not None else self.model_name
-        )
-        tl_config = convert_hf_model_config(
-            model_name=self.model_name,
-            hf_config=hf_config,
-        )
+        if self.model_name.startswith("NeelNanda"):
+            tokenizer = AutoTokenizer.from_pretrained(
+                self.model,
+                local_files_only=True,
+            )
+            model = HookedTransformer.from_pretrained_no_processing(
+                self.model_name,
+                use_flash_attn=True, 
+                tokenizer=tokenizer,
+                device=self.lorsa_config.device,
+                dtype=self.lorsa_config.dtype,
+            )
+            tl_config = model.cfg
+        else:
+            hf_config = AutoConfig.from_pretrained(
+                self.model if self.model is not None else self.model_name
+            )
+            tl_config = convert_hf_model_config(
+                model_name=self.model_name,
+                hf_config=hf_config,
+            )
         self.lorsa_config.update_from_model_config(
             HookedTransformerConfig.unwrap(tl_config)
         )
@@ -242,8 +260,9 @@ class DataGenConfig:
     use_flash_attn: bool
 
     # data config
-    layers: list = None
-    n_batchs: int
+    names_filter: list = None
+    num_shards: int
+    shard_index: int
     batch_size: int
     n_ctx: int
     prepend_bos: bool
