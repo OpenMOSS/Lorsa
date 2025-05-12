@@ -9,8 +9,8 @@ from transformers import (
 def load_tl_model(model_name: str):
     device = 'cuda'
     model_path = {
-        "meta-llama/Llama-3.1-8B": "/inspire/hdd/ws-8207e9e2-e733-4eec-a475-cfa1c36480ba/embodied-multimodality/public/zfhe/models/Llama-3.1-8B",
-        "EleutherAI/pythia-160m": "/inspire/hdd/ws-8207e9e2-e733-4eec-a475-cfa1c36480ba/embodied-multimodality/public/zfhe/models/pythia-160m",
+        "meta-llama/Llama-3.1-8B": "",
+        "EleutherAI/pythia-160m": "",
     }[model_name]
     
     dtype = {
