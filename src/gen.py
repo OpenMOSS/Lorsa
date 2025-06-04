@@ -75,7 +75,7 @@ def generate_train_data(cfg: DataGenConfig):
 
             for key, value in cache.items():
                 result_dir = os.path.join(cfg.result_dir, key)
-                tasks.append((value.to(cfg.dtype).cpu(), result_dir, f"shard-{cfg.shard_index}-chunk-{batch_index}.pt"))
+                tasks.append((value.to(cfg.dtype).cpu(), result_dir, f"shard-{cfg.shard_index:04d}-chunk-{batch_index:06d}.pt"))
 
             futures = [executor.submit(save_tensor, task) for task in tasks]
 

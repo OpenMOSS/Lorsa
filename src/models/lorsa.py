@@ -358,36 +358,7 @@ class LowRankSparseAttention(nn.Module):
             top_k_values, _ = torch.kthvalue(l1, k=k_smallest, dim=2)
             
             # top_k_mask: (batch_size, query_pos, n_heads)
-            top_k_mask = l1 >= top_k_values.unsqueeze(-1)
-
-            '''
-            # batch topk
-            k_smallest = (self.cfg.n_ov_heads - self.cfg.top_k) * filter_mask.numel() + 1
-
-            top_k_values, _ = torch.kthvalue(l1.contiguous().view(-1), k=k_smallest)
-
-            top_k_mask = l1 >= top_k_values
-            
-            # approximate batch topk
-            k_smallest = self.cfg.n_ov_heads - self.cfg.top_k + 1
-
-            # top_k_values: (batch_size, query_pos)
-            top_k_values, _ = torch.kthvalue(l1, k=k_smallest, dim=2)
-            
-            # top_k_mask: (batch_size, query_pos, n_heads)
-            top_k_mask = l1 >= top_k_values[filter_mask].median()
-
-            # sentence topk
-            k_smallest = filter_mask.sum(dim=-1) * (self.cfg.n_ov_heads - self.cfg.top_k) + 1
-
-            l1[~filter_mask] = float('-inf')
-
-            flat_l1 = l1.contiguous().view(l1.shape[0], -1)
-
-            top_k_values = torch.stack([flat_l1[i].kthvalue(k_smallest[i]).values for i in range(l1.shape[0])])
-
-            top_k_mask = l1 >= top_k_values.view(-1, 1, 1)
-            '''
+            top_k_mask = l1 > top_k_values.unsqueeze(-1)
 
         top_k_z = z * top_k_mask.unsqueeze(-1)
 
@@ -482,35 +453,6 @@ class LowRankSparseAttention(nn.Module):
         x_rotated = x_rot * rotary_cos + x_flip * rotary_sin
 
         return torch.cat([x_rotated, x_pass], dim=-1)
-
-    '''
-    def calculate_sin_cos_rotary(
-        self,
-        rotary_dim: int,
-        n_ctx: int,
-        base: int = 10000,
-        dtype: torch.dtype = torch.float32,
-    ) -> Tuple[Float[torch.Tensor, "n_ctx rotary_dim"], Float[torch.Tensor, "n_ctx rotary_dim"]]:
-        """
-        Calculate the sine and cosine waves to use in a rotary embedding. See https://blog.eleuther.ai/rotary-embeddings/ for details
-
-        Note: For some inexplicable reason, in GPT-J each ADJACENT pair of elements in k and q are rotated, in GPT-NeoX the pair of elements at k and k+n//2 are rotated (ie folding the full length in half, and then looking at pairs accordingly). I have absolutely no clue why, it should be completely equivalent.
-        To resolve this, I've coded it to default to the GPT-J mode, but to explicitly check whether it's GPT-NeoX and then do the GPT-NeoX thing if it is.
-        """
-        high_precision = torch.float32 if dtype != torch.float64 else torch.float64
-        pos = torch.arange(n_ctx, dtype=high_precision)
-        dim = torch.arange(rotary_dim // 2, dtype=high_precision)
-
-        # A set of frequencies evenly spaced in log space
-        freq = base ** (dim / (rotary_dim / 2))
-        if self.cfg.rotary_adjacent_pairs:
-            freq = einops.repeat(freq, "d -> (d 2)")
-        else:
-            freq = einops.repeat(freq, "d -> (2 d)")
-        # Create a n_ctx x rotary_dim tensor, where each column is an arithmetic sequence of angles in that frequency
-        angles = pos[:, None] / freq[None, :]
-        return torch.sin(angles).to(dtype), torch.cos(angles).to(dtype)
-    '''
 
     def calculate_sin_cos_rotary(
         self,

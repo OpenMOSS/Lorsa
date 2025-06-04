@@ -4,7 +4,7 @@ from typing import Annotated, Any, Literal, Union, cast, List
 from jaxtyping import Float
 import random
 import sys
-sys.path.append('/inspire/hdd/ws-8207e9e2-e733-4eec-a475-cfa1c36480ba/embodied-multimodality/public/zfhe/zf_projects/Lorsa/src')
+sys.path.append('/inspire/hdd/project/embodied-multimodality/public/zfhe/jx_projects/Lorsa/src')
 
 import msgpack
 import numpy as np
@@ -41,9 +41,9 @@ dataset_cache: dict[str, Dataset] = {}
 
 def get_model(lorsa_name: str) -> HookedTransformer:
     MODEL_PATH = {
-        "meta-llama/Llama-3.1-8B": "/inspire/hdd/ws-8207e9e2-e733-4eec-a475-cfa1c36480ba/embodied-multimodality/public/zfhe/models/Llama-3.1-8B",
-        "EleutherAI/pythia-160m": "/inspire/hdd/ws-8207e9e2-e733-4eec-a475-cfa1c36480ba/embodied-multimodality/public/zfhe/models/pythia-160m",
-        "NeelNanda/GELU_2L512W_C4_Code": "/inspire/hdd/ws-8207e9e2-e733-4eec-a475-cfa1c36480ba/embodied-multimodality/public/zfhe/models/GELU_2L512W_C4_Code",
+        "meta-llama/Llama-3.1-8B": "/inspire/hdd/project/embodied-multimodality/public/zfhe/models/Llama-3.1-8B",
+        "EleutherAI/pythia-160m": "/inspire/hdd/project/embodied-multimodality/public/zfhe/models/pythia-160m",
+        "NeelNanda/GELU_2L512W_C4_Code": "/inspire/hdd/project/embodied-multimodality/public/zfhe/models/GELU_2L512W_C4_Code",
     }
     
     path = f"{result_dir}/{lorsa_name}"
