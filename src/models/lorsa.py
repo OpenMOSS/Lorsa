@@ -6,16 +6,20 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.functional import scaled_dot_product_attention
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 import einops
 
 from config import LorsaConfig
+from .kernel import _flash_attn_forward, _flash_attn_backward
 
 class LowRankSparseAttention(nn.Module):
     def __init__(self, config: LorsaConfig):
         super(LowRankSparseAttention, self).__init__()
         
         self.cfg = config
+        assert self.cfg.d_ov_head == 1, "d_ov_head must be 1 for lorsa"
         
         if self.cfg.attn_scale is None:
             self.cfg.attn_scale = self.cfg.d_qk_head ** 0.5
@@ -141,6 +145,23 @@ class LowRankSparseAttention(nn.Module):
                 return
         raise ValueError(f"Parameter '{param_name}' not found in model.")
     
+    def cal_q_k(self, resid: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        q = F.linear(resid,
+                    einops.rearrange(self.W_Q, "head_index d_model d_head -> (head_index d_head) d_model"), 
+                    einops.rearrange(self.b_Q, "head_index d_head -> (head_index d_head)")).reshape(resid.shape[0], resid.shape[1], self.b_Q.shape[0], self.b_Q.shape[1])
+        k = F.linear(resid, 
+                    einops.rearrange(self.W_K, "head_index d_model d_head -> (head_index d_head) d_model"), 
+                    einops.rearrange(self.b_K, "head_index d_head -> (head_index d_head)")).reshape(resid.shape[0], resid.shape[1], self.b_K.shape[0], self.b_K.shape[1])
+        
+        if self.cfg.positional_embedding_type == "rotary":
+            q = self.apply_rotary(q)
+            k = self.apply_rotary(k)
+        
+        if self.cfg.virtual_kv_num > 0:
+            k = torch.cat((k, self.virtual_k.unsqueeze(0).expand(resid.shape[0], -1, -1, -1)), dim=1)
+        
+        return q, k # Shape: (batch_size, q_pos, n_qk_heads, d_head) (batch_size, k_pos, n_qk_heads, d_head)
+    
     def cal_q_k_v(self, resid: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         q = F.linear(resid,
                     einops.rearrange(self.W_Q, "head_index d_model d_head -> (head_index d_head) d_model"), 
@@ -162,7 +183,9 @@ class LowRankSparseAttention(nn.Module):
         
         return q, k, v # Shape: (batch_size, q_pos, n_qk_heads, d_head) (batch_size, k_pos, n_qk_heads, d_head) (batch_size, k_pos, n_ov_heads, d_head)
         
-    def cal_attn_scores(self, q: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
+    def cal_attn_scores(self, resid: torch.Tensor) -> torch.Tensor:
+        q, k = self.cal_q_k(resid)
+        
         q_ = einops.rearrange(
             q, "batch query_pos head_index d_head -> batch head_index query_pos d_head"
         )
@@ -176,53 +199,38 @@ class LowRankSparseAttention(nn.Module):
         
         return attn_scores # Shape: (batch_size, n_qk_heads, query_pos, key_pos)
     
-    def cal_pattern(self, q: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
-        attn_scores = self.cal_attn_scores(q, k)
+    def cal_pattern(self, resid: torch.Tensor = None, q: torch.Tensor = None, k: torch.Tensor = None) -> torch.Tensor:
+        if q is not None and k is not None:
+            q_ = einops.rearrange(
+                q, "batch query_pos head_index d_head -> batch head_index query_pos d_head"
+            )
+            k_ = einops.rearrange(
+                k, "batch key_pos head_index d_head -> batch head_index d_head key_pos"
+            )
+            attn_scores = q_ @ k_ / self.cfg.attn_scale
+            
+            # If causal attention, we mask it to only attend backwards. If bidirectional, we don't mask.
+            attn_scores = self.apply_causal_mask(attn_scores)
+        elif resid is not None:
+            attn_scores = self.cal_attn_scores(resid)
+        else:
+            raise ValueError("Either 'resid' or both 'q' and 'k' must be provided, but got None for both")
         
         pattern = F.softmax(attn_scores, dim=-1)
         pattern = torch.where(torch.isnan(pattern), torch.zeros_like(pattern), pattern)
         
         return pattern # Shape: (batch_size, n_qk_heads, query_pos, key_pos)
     
-    def cal_per_key_position_z_with_h(
-        self, 
-        v: torch.Tensor, 
-        pattern: torch.Tensor,
-        interested_head_mask: Float[torch.Tensor, "reduced_n_ov_heads"] | None = None,
-    ) -> Float[torch.Tensor, "batch_size query_pos key_pos n_heads d_head"]:
-        """
-        Get Z pattern of each key pos without summing, might consume a lot of memory.
-        `interested_head_mask` indexes the heads we are interested.
-        """
-
-        if interested_head_mask is None:
-            interested_head_mask = torch.arange(v.size(2), dtype=torch.int32, device=v.device)
-                
-        v_ = einops.rearrange(
-            v, "batch key_pos head_index d_head -> batch head_index key_pos d_head"
-        )[:, interested_head_mask, :, :] # Shape: (batch_size, reduced_n_ov_heads, key_pos, d_head)
-        
-        lorsa_rate = self.cfg.n_ov_heads // self.cfg.n_qk_heads
-        pattern_ = pattern[:, interested_head_mask // lorsa_rate, :, :] # Shape: (batch_size, reduced_n_ov_heads, query_pos, key_pos)
-        
-        z = pattern_[:, :, :, :, None] * v_[:, :, None, :, :] 
-        # Shape: (batch_size, reduced_n_ov_heads, query_pos, key_pos, d_head)
-
-        # Rearrange z to the desired shape
-        z = einops.rearrange(
-            z, "batch head_index query_pos key_pos d_head -> batch query_pos key_pos head_index d_head"
-        ) # shape: (batch_size, query_pos, key_pos, reduced_n_ov_heads, d_head)
-        
-        return z
-    
     def cal_z_with_h(
         self, 
-        v: torch.Tensor, # Shape: (batch_size, key_pos, n_ov_heads, d_head)
-        pattern: torch.Tensor # Shape: (batch_size, n_qk_heads, query_pos, key_pos)
+        resid: torch.Tensor
     ) -> Float[torch.Tensor, "batch_size query_pos n_heads d_head"]:
         """
         Get Z pattern (summing over key positions).
         """
+        q, k, v = self.cal_q_k_v(resid)
+        
+        pattern = self.cal_pattern(q=q, k=k)
         
         v_ = einops.rearrange(
             v, "batch key_pos head_index d_head -> batch head_index key_pos d_head"
@@ -238,178 +246,180 @@ class LowRankSparseAttention(nn.Module):
         
         return z
     
-    def cal_q_k_v_pattern(self, resid):
-        q, k, v = self.cal_q_k_v(resid) # Shape: (batch_size, query_pos, n_heads, d_head)
-        
-        pattern = self.cal_pattern(q, k) # Shape: (batch_size, n_heads, query_pos, key_pos)
-
-        return q, k, v, pattern
-    
     def decode_z_with_W_O(self, z):
         # There may be some accuracy differences compared to using F.linear to operate directly with W_O and b_O  
         return torch.einsum("bqhd,hdm->bqm", z, self.W_O)  # Shape: (batch_size, query_pos, d_model)
     
-    def cal_out(self, resid: torch.Tensor) -> torch.Tensor:
-        
-        '''
-        Calculate the output of each query position without b_O 
-        '''
-        
-        q, k, v, pattern = self.cal_q_k_v_pattern(resid)
-
-        z = self.cal_z_with_h(v, pattern) # Shape: (batch_size, query_pos, n_heads, d_head)
-
-        return self.decode_z_with_W_O(z)
-    
-    def cal_out_from_per_key_position(self, resid: torch.Tensor) -> torch.Tensor:
-        
-        '''
-        Calculate the output of each query position and each key position, without b_O 
-        '''
-        
-        q, k, v, pattern = self.cal_q_k_v_pattern(resid)
-        
-        z = self.cal_per_key_position_z_with_h(v, pattern) # Shape: (batch_size, query_pos, key_pos, n_heads, d_head)
-                
-        return self.decode_z_with_W_O(z)
-        
-    
-    def cal_out_from_per_key_position_h(self, resid: torch.Tensor) -> torch.Tensor:
-        
-        '''
-        Calculate the output of each head, each query position, each key position, without b_O 
-        '''
-        
-        q, k, v, pattern = self.cal_q_k_v_pattern(resid)
-        
-        z = self.cal_per_key_position_z_with_h(v, pattern) # Shape: (batch_size, query_pos, key_pos, n_heads, d_head)
-
-        return self.decode_z_with_W_O(z)
-    
-    def cal_out_with_h(self, resid: torch.Tensor, mode = None) -> torch.Tensor:
-        
-        '''
-        Calculate the output of each query position and each head without b_O 
-        '''
-        
-        q, k, v, pattern = self.cal_q_k_v_pattern(resid)
-        
-        z = self.cal_z_with_h(v, pattern) # Shape: (batch_size, query_pos, n_heads, d_head)
-        
-        out = torch.einsum("bqnh,nhm->bqnm", z, self.W_O) # Shape: (batch_size, query_pos, n_heads, d_model)
-        
-        if mode == 'top_k' or (mode is None and self.cfg.mode == 'top_k'):
+    class FlashLorsaTopkFunc(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, q, k, v, topk, W_O, use_z_relu, causal=True, softmax_scale=None):
+            """
+            q: (batch_size, seqlen_q, nheads, headdim)
+            k: (batch_size, seqlen_k, nheads, headdim)
+            v: (batch_size, seqlen_k, nheads, 1)
+            W_O: Output projection weights from the parent model
+            use_z_relu: Whether to use ReLU in z computation
+            """
+            if _flash_attn_forward is None:
+                raise ImportError("Flash attention kernel is not available. Please check your kernel module.")
             
-            with torch.no_grad():
-                l1 = torch.linalg.vector_norm(out, dim=-1) # batch_size, query_pos, n_heads
-                top_k_indices = torch.topk(l1, self.cfg.top_k, dim=2).indices # batch_size, query_pos, top_k
-                
-                batch_size, seq_len, n_heads = out.shape[:3]
-                head_mask = torch.zeros((batch_size, seq_len, n_heads), dtype=torch.int32).to(self.cfg.device)
-                head_mask.scatter_(2, top_k_indices, 1)
-                
-                out = out * head_mask.unsqueeze(-1)
-        
-        return out # Shape: (batch_size, query_pos, n_heads, d_model)
-    
-    def cal_out_top_k(self, resid: torch.Tensor) -> torch.Tensor:
-        
-        '''
-        Calculate the output of heads which have top_k l1 norm, without b_O
-        '''
-        
-        q, k, v, pattern = self.cal_q_k_v_pattern(resid)
-        
-        z = self.cal_z_with_h(v, pattern) # Shape: (batch_size, query_pos, n_heads, d_head)
-        
-        out_heads = torch.einsum("bqnh,nhm->bqnm", z, self.W_O) # Shape: (batch_size, query_pos, n_heads, d_model)
-        
-        with torch.no_grad():
-            l1 = torch.linalg.vector_norm(out_heads, dim=-1) # batch_size, query_pos, n_heads
-            top_k_indices = torch.topk(l1, self.cfg.top_k, dim=2).indices # batch_size, query_pos, top_k
-        
-        top_k_out_heads = torch.gather(out_heads, dim=2, index=top_k_indices.unsqueeze(-1).expand(-1, -1, -1, self.cfg.d_model)) # batch_size, seq_len, top_k, d_model
-        top_k_out = top_k_out_heads.sum(dim=2) # batch_size, seq_len, d_model
-        
-        # batch_size, seq_len, n_heads, d_model = out_heads.shape
-        # mask = torch.zeros(batch_size, seq_len, n_heads, device=out_heads.device, dtype=torch.bool)
-        # mask.scatter_(2, top_k_indices, True)
-        # top_k_out = (out_heads * mask.unsqueeze(-1)).sum(dim=2)  # Shape: (batch_size, seq_len, d_model)
-        
-        return top_k_out, top_k_indices
-    
-    def cal_out_top_k_for_ov1(self, resid: torch.Tensor):
-        q, k, v, pattern = self.cal_q_k_v_pattern(resid)
-        
-        # z: (batch_size, query_pos, n_heads, d_head)
-        z = self.cal_z_with_h(v, pattern)
+            # Make sure that the last dimension is contiguous
+            q, k, v = [x if x.stride(-1) == 1 else x.contiguous() for x in [q, k, v]]
+            o, lse, ctx.softmax_scale = _flash_attn_forward(
+                q, k, v, causal=causal, softmax_scale=softmax_scale
+            )
+            
+            if use_z_relu:
+                l1 = torch.nn.functional.relu(o.squeeze(-1)) * torch.norm(W_O, p=2, dim=2).view(1, 1, W_O.shape[0])
+            else:
+                l1 = torch.abs(o.squeeze(-1)) * torch.norm(W_O, p=2, dim=2).view(1, 1, W_O.shape[0])
+            
+            topk_values, topk_indices = l1.topk(k=topk, dim=2)
+            
+            B, S, _ = l1.shape
+            mask = torch.zeros_like(l1, dtype=bool)
+            mask[torch.arange(B).view(B, 1, 1, 1).expand(B, S, topk, 1), 
+                    torch.arange(S).view(1, S, 1, 1).expand(B, S, topk, 1), 
+                    topk_indices] = True
 
-        with torch.no_grad():
-            # l1: (batch_size, query_pos, n_heads)
+            o = o * mask.unsqueeze(-1)
+            l1 = l1 * mask
+            
+            ctx.save_for_backward(q, k, v, o, lse, topk_indices)
+            
+            return o, l1
+
+        @staticmethod
+        def backward(ctx, do, dl1):
+            if _flash_attn_backward is None:
+                raise ImportError("Flash attention kernel is not available. Please check your kernel module.")
+                
+            q, k, v, o, lse, topk_indices = ctx.saved_tensors
+            
+            # Triton's autotune causes the Tensor._version to change, and so Pytorch autograd
+            # does a memcpy. To avoid this we run in inference_mode, which doesn't track the version.
+            with torch.inference_mode():
+                dq = torch.zeros_like(q)
+                dk = torch.zeros_like(k)
+                dv = torch.zeros_like(v)
+                _flash_attn_backward(
+                    do,
+                    q,
+                    k,
+                    v,
+                    o,
+                    lse,
+                    topk_indices,
+                    dq,
+                    dk,
+                    dv,
+                    causal=ctx.causal,
+                    softmax_scale=ctx.softmax_scale,
+                )
+            return dq, dk, dv, None, None, None, None
+    
+    def flash_lorsa_topk(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, topk: int, causal: bool = True, softmax_scale: Optional[float] = None) -> torch.Tensor:
+        """
+        FlashAttention-based top-k sparse attention implementation.
+        
+        Args:
+            q: Query tensor of shape (batch_size, seqlen_q, nheads, headdim)
+            k: Key tensor of shape (batch_size, seqlen_k, nheads, headdim)  
+            v: Value tensor of shape (batch_size, seqlen_k, nheads, 1)
+            topk: Number of top-k values to keep
+            causal: Whether to use causal attention
+            softmax_scale: Scale factor for softmax, defaults to self.cfg.attn_scale
+            
+        Returns:
+            Output tensor after top-k sparse attention
+        """
+        if softmax_scale is None:
+            softmax_scale = self.cfg.attn_scale
+            
+        # Use the inner class and pass model parameters
+        return self.FlashLorsaTopkFunc.apply(
+            q, k, v, topk, 
+            self.W_O, self.cfg.use_z_relu,
+            causal, softmax_scale
+        )
+    
+    def cal_out(self, resid: torch.Tensor):
+        if self.cfg.mode == "top_k":
+            # topk with flash lorsa
+            if (self.cfg.use_flash_lorsa and 
+                self.cfg.n_qk_heads == self.cfg.n_ov_heads and 
+                self.cfg.virtual_kv_num == 0 and # same query and key length
+                self.cfg.d_ov_head == 1):
+                q, k, v = self.cal_q_k_v(resid)
+                
+                z, l1 = self.flash_lorsa_topk(q, k, v, self.cfg.top_k, causal=True, softmax_scale=self.cfg.attn_scale)
+                
+            else:
+                # flash attention
+                if (self.cfg.use_flash_lorsa and 
+                    self.cfg.d_qk_head * self.cfg.n_qk_heads == self.cfg.d_ov_head * self.cfg.n_ov_heads and 
+                    self.cfg.virtual_kv_num == 0 and # same query and key length
+                    self.cfg.d_ov_head == 1):
+                    q, k, v = self.cal_q_k_v(resid)
+                    v = v.reshape(v.shape[0], v.shape[1], self.cfg.n_qk_heads, self.cfg.d_qk_head)
+                    with sdpa_kernel(backends=[SDPBackend.FLASH_ATTENTION]):
+                        z = F.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2))
+                    z = z.transpose(1, 2)
+                    z = z.reshape(z.shape[0], z.shape[1], self.cfg.n_ov_heads, self.cfg.d_ov_head)
+                    
+                # simple attention
+                else:
+                    z = self.cal_z_with_h(resid)
+                    
+                with torch.no_grad():
+                    # l1: (batch_size, query_pos, n_heads)
+                    if self.cfg.use_z_relu:
+                        l1 = torch.nn.functional.relu(z.squeeze(-1)) * torch.norm(self.W_O, p=2, dim=2).view(1, 1, self.cfg.n_ov_heads)
+                    else:
+                        l1 = torch.abs(z.squeeze(-1)) * torch.norm(self.W_O, p=2, dim=2).view(1, 1, self.cfg.n_ov_heads)
+                    
+                    topk_values, topk_indices = l1.topk(k=self.cfg.top_k, dim=2)
+                    
+                    # B, S, _ = l1.shape
+                    # mask = torch.zeros_like(l1, dtype=bool)
+                    # mask[torch.arange(B).view(B, 1, 1).expand(B, S, self.cfg.top_k), torch.arange(S).view(1, S, 1).expand(B, S, self.cfg.top_k), topk_indices] = True
+            
+                    # topk
+                    k_smallest = self.cfg.n_ov_heads - self.cfg.top_k + 1
+
+                    # top_k_values: (batch_size, query_pos)
+                    top_k_values, _ = torch.kthvalue(l1, k=k_smallest, dim=2)
+                    
+                    # top_k_mask: (batch_size, query_pos, n_heads)
+                    mask = l1 >= top_k_values.unsqueeze(-1)
+                    
+                    z = z * mask.unsqueeze(-1)
+                    l1 = l1 * mask
+                    
+        elif self.cfg.mode == "jumprelu":
+            # flash attention
+            if self.cfg.use_flash_lorsa and self.cfg.d_qk_head * self.cfg.n_qk_heads == self.cfg.d_ov_head * self.cfg.n_ov_heads and self.cfg.d_ov_head == 1:
+                q, k, v = self.cal_q_k_v(resid)
+                v = v.reshape(resid.shape[0], resid.shape[1], self.cfg.n_qk_heads, self.cfg.d_qk_head)
+                z = F.scaled_dot_product_attention(q, k, v, attention_mask=self.mask[None, None, -q.shape[1]:, -k.shape[1]:])
+            # simple attention
+            else:
+                z = self.cal_z_with_h(resid)
+                
             if self.cfg.use_z_relu:
                 l1 = torch.nn.functional.relu(z.squeeze(-1)) * torch.norm(self.W_O, p=2, dim=2).view(1, 1, self.cfg.n_ov_heads)
             else:
                 l1 = torch.abs(z.squeeze(-1)) * torch.norm(self.W_O, p=2, dim=2).view(1, 1, self.cfg.n_ov_heads)
-            
-            # topk
-            k_smallest = self.cfg.n_ov_heads - self.cfg.top_k + 1
-
-            # top_k_values: (batch_size, query_pos)
-            top_k_values, _ = torch.kthvalue(l1, k=k_smallest, dim=2)
-            
-            # top_k_mask: (batch_size, query_pos, n_heads)
-            top_k_mask = l1 > top_k_values.unsqueeze(-1)
-
-        top_k_z = z * top_k_mask.unsqueeze(-1)
 
         # out: (batch_size, query_pos, d_model)
-        out = self.decode_z_with_W_O(top_k_z)
-
-        return out, top_k_z.squeeze(-1), l1 * top_k_mask
-
-    def cal_out_l1_for_ov1(self, resid: torch.Tensor):
-        q, k, v, pattern = self.cal_q_k_v_pattern(resid)
-        
-        # z: (batch_size, query_pos, n_heads, d_head)
-        z = self.cal_z_with_h(v, pattern)
-
-        if self.cfg.use_z_relu:
-            l1 = F.relu(z.squeeze(-1)) * torch.norm(self.W_O, p=2, dim=2).view(1, 1, self.cfg.n_ov_heads)
-        else:
-            l1 = torch.abs(z.squeeze(-1)) * torch.norm(self.W_O, p=2, dim=2).view(1, 1, self.cfg.n_ov_heads)
-
-        # out: (batch_size, query_pos, d_model)
-        out = torch.einsum("bqhd,hdm->bqm", z, self.W_O)
+        out = self.decode_z_with_W_O(z)
 
         return out, l1
 
     def forward(self, resid: torch.Tensor) -> torch.Tensor:
-        out = self.cal_out(resid) # Shape: (batch_size, query_pos, d_model)
+        out, l1 = self.cal_out(resid) # Shape: (batch_size, query_pos, d_model), (batch_size, query_pos, n_heads)
         out = out + self.b_O
-        return out # Shape: (batch_size, query_pos, d_model)
-    
-    def forward_top_k(self, resid: torch.Tensor) -> torch.Tensor:
-        if self.cfg.d_ov_head == 1:
-            out, top_k_z, l1 = self.cal_out_top_k_for_ov1(resid) # Shape: (batch_size, query_pos, d_model) (batch_size, seq_len, n_heads, d_head)
-        else:
-            raise NotImplementedError('Not implemented yet')
-            # out, top_k_z = self.cal_out_top_k(resid) # Shape: (batch_size, query_pos, d_model) (batch_size, seq_len, top_k)
-        out = out + self.b_O
-        return out, top_k_z, l1 # Shape: (batch_size, query_pos, d_model), (batch_size, seq_len, n_heads, d_head), (batch_size, seq_len, n_heads)
-    
-    def forward_l1(self, resid: torch.Tensor) -> torch.Tensor:
-        if self.cfg.d_ov_head == 1:
-            out, l1 = self.cal_out_l1_for_ov1(resid)
-        else:
-            raise NotImplementedError('Not implemented yet')
-            # out = self.cal_out_with_h(resid)
-        out = out + self.b_O
-        return out, l1
-    
-    def forward_with_k(self, resid: torch.Tensor)-> torch.Tensor:
-        out = self.cal_out_with_k(resid) # Shape: (batch_size, query_pos, key_pos, d_model)
-        return out # Shape: (batch_size, query_pos, key_pos, d_model)
-    
+        return out, l1 # Shape: (batch_size, query_pos, d_model), (batch_size, query_pos, n_heads)
     
     def rotate_every_two(
         self, x: Float[torch.Tensor, "... rotary_dim"]
@@ -580,3 +590,34 @@ class LowRankSparseAttention(nn.Module):
             torch.cuda.empty_cache()
 
         return lorsa
+
+    def cal_per_key_position_z_with_h(
+        self, 
+        v: torch.Tensor, 
+        pattern: torch.Tensor,
+        interested_head_mask: Float[torch.Tensor, "reduced_n_ov_heads"] | None = None,
+    ) -> Float[torch.Tensor, "batch_size query_pos key_pos n_heads d_head"]:
+        """
+        Get Z pattern of each key pos without summing, might consume a lot of memory.
+        `interested_head_mask` indexes the heads we are interested.
+        """
+
+        if interested_head_mask is None:
+            interested_head_mask = torch.arange(v.size(2), dtype=torch.int32, device=v.device)
+                
+        v_ = einops.rearrange(
+            v, "batch key_pos head_index d_head -> batch head_index key_pos d_head"
+        )[:, interested_head_mask, :, :] # Shape: (batch_size, reduced_n_ov_heads, key_pos, d_head)
+        
+        lorsa_rate = self.cfg.n_ov_heads // self.cfg.n_qk_heads
+        pattern_ = pattern[:, interested_head_mask // lorsa_rate, :, :] # Shape: (batch_size, reduced_n_ov_heads, query_pos, key_pos)
+        
+        # Shape: (batch_size, reduced_n_ov_heads, query_pos, key_pos, d_head)
+        z = pattern_[:, :, :, :, None] * v_[:, :, None, :, :] 
+
+        # Rearrange z to the desired shape
+        z = einops.rearrange(
+            z, "batch head_index query_pos key_pos d_head -> batch query_pos key_pos head_index d_head"
+        ) # shape: (batch_size, query_pos, key_pos, reduced_n_ov_heads, d_head)
+        
+        return z

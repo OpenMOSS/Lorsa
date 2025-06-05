@@ -28,12 +28,12 @@ class LorsaConfig:
     n_ctx: int = 256
     layer: int | None = None
     model_name: str | None = None
+    use_flash_lorsa: bool = False
     
-    mode: Literal["default", "top_k", "l1"] = "default"
+    mode: Literal["top_k", "jumprelu"] = "top_k"
     top_k: Optional[int] = None
     
     avg_norm: dict = None
-    
     
     # config from model config
     d_model: Optional[int] = None

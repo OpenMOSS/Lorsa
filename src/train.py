@@ -43,12 +43,7 @@ def train_lorsa(lorsa: LowRankSparseAttention, cfg: LorsaTrainConfig, activation
         with torch.no_grad():
             hook_in, hook_out, filter_mask = activation_dataset.next(batch_size=cfg.batch_size)
             hook_in, hook_out = lorsa.scale_norm(hook_in, hook_out)
-            if cfg.mode == "top_k":
-                out, _, _ = lorsa.forward_top_k(hook_in)
-            elif cfg.mode == "l1":
-                out, _ = lorsa.forward_l1(hook_in)
-            elif cfg.mode == "default":
-                out = lorsa.forward(hook_in)
+            out, _ = lorsa.forward(hook_in)
             
             scale = torch.mean(torch.norm(hook_out[filter_mask]-lorsa.b_O, p=2, dim=-1)) / torch.mean(torch.norm(out[filter_mask]-lorsa.b_O, p=2, dim=-1))
             if cfg.init_qk_with_orig_qk == False:
@@ -80,18 +75,12 @@ def train_lorsa(lorsa: LowRankSparseAttention, cfg: LorsaTrainConfig, activation
         hook_in, hook_out = lorsa.scale_norm(hook_in, hook_out)
         
         # forward
+        out, l1 = lorsa.forward(hook_in)
         if cfg.mode == "top_k":
-            out, top_k_z, l1 = lorsa.forward_top_k(hook_in)
             mse_loss = F.mse_loss(out[filter_mask], hook_out[filter_mask])
             loss = mse_loss
-        elif cfg.mode == "l1":
-            out, l1 = lorsa.forward_l1(hook_in)
-            mse_loss = F.mse_loss(out[filter_mask], hook_out[filter_mask])
-            loss = mse_loss + cfg.l1_coef * l1[filter_mask].sum(dim=-1).mean()
-        elif cfg.mode == "default":
-            out = lorsa.forward(hook_in)
-            mse_loss = F.mse_loss(out[filter_mask], hook_out[filter_mask])
-            loss = mse_loss
+        else:
+            raise NotImplementedError
         
         # back propagation
         optimizer.zero_grad() 
@@ -109,7 +98,7 @@ def train_lorsa(lorsa: LowRankSparseAttention, cfg: LorsaTrainConfig, activation
         if cfg.log_to_wandb and cfg.mode == "top_k":
             tokens_count += filter_mask.sum().item()
             if cfg.lorsa_config.d_ov_head == 1:
-                top_k_mask = (top_k_z.squeeze(dim=-1) != 0.).to(torch.int32)
+                top_k_mask = (l1 != 0.).to(torch.int32)
             else:
                 raise NotImplementedError
             counts = torch.sum(top_k_mask[filter_mask], dim=0)
@@ -211,7 +200,7 @@ def debug_train_lorsa(lorsa: LowRankSparseAttention, cfg: LorsaTrainConfig, acti
             hook_in, hook_out, filter_mask = activation_dataset.next(batch_size=cfg.batch_size)
             hook_in, hook_out = lorsa.scale_norm(hook_in, hook_out)
             if cfg.mode == "top_k":
-                out, _, _ = lorsa.forward_top_k(hook_in)
+                out, _, _ = lorsa.forward(hook_in)
             elif cfg.mode == "l1":
                 out, _ = lorsa.forward_l1(hook_in)
             elif cfg.mode == "default":
@@ -271,7 +260,7 @@ def debug_train_lorsa(lorsa: LowRankSparseAttention, cfg: LorsaTrainConfig, acti
         # (3) forward
         start_events["forward"].record()
         if cfg.mode == "top_k":
-            out, top_k_z, l1 = lorsa.forward_top_k(hook_in)
+            out, l1 = lorsa.forward(hook_in)
             mse_loss = F.mse_loss(out[filter_mask], hook_out[filter_mask])
             loss = mse_loss
         elif cfg.mode == "l1":
@@ -305,7 +294,7 @@ def debug_train_lorsa(lorsa: LowRankSparseAttention, cfg: LorsaTrainConfig, acti
         if cfg.log_to_wandb and cfg.mode == "top_k":
             tokens_count += filter_mask.sum().item()
             if cfg.lorsa_config.d_ov_head == 1:
-                top_k_mask = (top_k_z.squeeze(dim=-1) != 0.).to(torch.int32)
+                top_k_mask = (l1.squeeze(dim=-1) != 0.).to(torch.int32)
             else:
                 raise NotImplementedError
             counts = torch.sum(top_k_mask[filter_mask], dim=0)
