@@ -378,7 +378,7 @@ class LowRankSparseAttention(nn.Module):
                     else:
                         l1 = torch.abs(z.squeeze(-1)) * torch.norm(self.W_O, p=2, dim=2).view(1, 1, self.cfg.n_ov_heads)
                     
-                    topk_values, topk_indices = l1.topk(k=self.cfg.top_k, dim=2)
+                    # topk_values, topk_indices = l1.topk(k=self.cfg.top_k, dim=2)
                     
                     # B, S, _ = l1.shape
                     # mask = torch.zeros_like(l1, dtype=bool)

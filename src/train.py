@@ -82,6 +82,11 @@ def train_lorsa(lorsa: LowRankSparseAttention, cfg: LorsaTrainConfig, activation
         else:
             raise NotImplementedError
         
+        
+        print(out[0, :, 0])
+        print(hook_out[0, :, 0])
+        exit()
+        
         # back propagation
         optimizer.zero_grad() 
         loss.backward()
