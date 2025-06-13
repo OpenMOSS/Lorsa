@@ -165,50 +165,6 @@ def _fwd_kernel(
         tl.store(out_ptrs, acc_o, mask=offs_m[:, None] < seqlen_q)
 
 @triton.jit
-def _bwd_preprocess_do_o_dot_true(
-    Out,
-    DO,
-    Delta,
-    stride_ob,
-    stride_oh,
-    stride_om,
-    stride_dob,
-    stride_doh,
-    stride_dom,
-    nheads,
-    seqlen_q,
-    seqlen_q_rounded,
-    headdim,
-    BLOCK_M: tl.constexpr,
-    BLOCK_HEADDIM: tl.constexpr,
-):
-    start_m = tl.program_id(0)
-    off_hb = tl.program_id(1)
-    off_b = off_hb // nheads
-    off_h = off_hb % nheads
-    # initialize offsets
-    offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    offs_d = tl.arange(0, BLOCK_HEADDIM)
-    # load
-    o = tl.load(
-        Out + off_b * stride_ob + off_h * stride_oh + (offs_m * stride_om)[:, None],
-        mask=(offs_m[:, None] < seqlen_q),
-        other=0.0,
-    ).to(tl.float32)
-    do = tl.load(
-        DO
-        + off_b * stride_dob
-        + off_h * stride_doh
-        + (offs_m * stride_om)[:, None],
-        mask=(offs_m[:, None] < seqlen_q),
-        other=0.0,
-    ).to(tl.float32)
-    delta = tl.sum(o * do, axis=1)
-    # write-back
-    tl.store(Delta + off_hb * seqlen_q_rounded + offs_m, delta)
-
-
-@triton.jit
 def _bwd_preprocess_do_o_dot(
     Out,
     DO,
@@ -407,7 +363,7 @@ def _flash_attn_forward(q, k, v, causal=False, softmax_scale=None):
     BLOCK_HEADDIM = max(triton.next_power_of_2(d), 16)
     BLOCK = 128
     num_warps = 4 if d <= 64 else 8
-    # if batch_size=32, it will rise ""
+    # if batch_size=32, it will rise some error
     grid = lambda META: (triton.cdiv(seqlen_q, META["BLOCK_M"]), batch, nheads)
     _fwd_kernel[grid](
         q,
