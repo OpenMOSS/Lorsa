@@ -253,39 +253,34 @@ class LowRankSparseAttention(nn.Module):
     class FlashLorsaTopkFunc(torch.autograd.Function):
         @staticmethod
         def forward(ctx, q, k, v, topk, W_O, use_z_relu, causal=True, softmax_scale=None):
-            """
-            q: (batch_size, seqlen_q, nheads, headdim)
-            k: (batch_size, seqlen_k, nheads, headdim)
-            v: (batch_size, seqlen_k, nheads, 1)
-            W_O: Output projection weights from the parent model
-            use_z_relu: Whether to use ReLU in z computation
-            """
             if _flash_attn_forward is None:
-                raise ImportError("Flash attention kernel is not available. Please check your kernel module.")
+                raise ImportError("Flash attention kernel is not available.")
             
-            # Make sure that the last dimension is contiguous
             q, k, v = [x if x.stride(-1) == 1 else x.contiguous() for x in [q, k, v]]
             o, lse, ctx.softmax_scale = _flash_attn_forward(
                 q, k, v, causal=causal, softmax_scale=softmax_scale
             )
             
-            if use_z_relu:
-                l1 = torch.nn.functional.relu(o.squeeze(-1)) * torch.norm(W_O, p=2, dim=2).view(1, 1, W_O.shape[0])
-            else:
-                l1 = torch.abs(o.squeeze(-1)) * torch.norm(W_O, p=2, dim=2).view(1, 1, W_O.shape[0])
-            
-            topk_values, topk_indices = l1.topk(k=topk, dim=2)
-            
-            B, S, _ = l1.shape
-            mask = torch.zeros_like(l1, dtype=bool)
-            mask[torch.arange(B).view(B, 1, 1, 1).expand(B, S, topk, 1), 
-                    torch.arange(S).view(1, S, 1, 1).expand(B, S, topk, 1), 
-                    topk_indices] = True
+            with torch.no_grad():
+                if use_z_relu:
+                    l1 = torch.nn.functional.relu(o.squeeze(-1)).to(W_O.dtype) * torch.norm(W_O, p=2, dim=2).view(1, 1, W_O.shape[0])
+                else:
+                    l1 = torch.abs(o.squeeze(-1)).to(W_O.dtype) * torch.norm(W_O, p=2, dim=2).view(1, 1, W_O.shape[0])
+                
+                _, topk_indices = l1.topk(k=topk, dim=2)
+                
+                B, S, _ = l1.shape
+                mask = torch.zeros_like(l1, dtype=bool)
+                mask[torch.arange(B).view(B, 1, 1).expand(B, S, topk), 
+                     torch.arange(S).view(1, S, 1).expand(B, S, topk), 
+                     topk_indices] = True
 
             o = o * mask.unsqueeze(-1)
             l1 = l1 * mask
             
             ctx.save_for_backward(q, k, v, o, lse, topk_indices)
+            ctx.causal = causal
+            ctx.softmax_scale = softmax_scale
             
             return o, l1
 
@@ -316,32 +311,7 @@ class LowRankSparseAttention(nn.Module):
                     causal=ctx.causal,
                     softmax_scale=ctx.softmax_scale,
                 )
-            return dq, dk, dv, None, None, None, None
-    
-    def flash_lorsa_topk(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, topk: int, causal: bool = True, softmax_scale: Optional[float] = None) -> torch.Tensor:
-        """
-        FlashAttention-based top-k sparse attention implementation.
-        
-        Args:
-            q: Query tensor of shape (batch_size, seqlen_q, nheads, headdim)
-            k: Key tensor of shape (batch_size, seqlen_k, nheads, headdim)  
-            v: Value tensor of shape (batch_size, seqlen_k, nheads, 1)
-            topk: Number of top-k values to keep
-            causal: Whether to use causal attention
-            softmax_scale: Scale factor for softmax, defaults to self.cfg.attn_scale
-            
-        Returns:
-            Output tensor after top-k sparse attention
-        """
-        if softmax_scale is None:
-            softmax_scale = self.cfg.attn_scale
-            
-        # Use the inner class and pass model parameters
-        return self.FlashLorsaTopkFunc.apply(
-            q, k, v, topk, 
-            self.W_O, self.cfg.use_z_relu,
-            causal, softmax_scale
-        )
+            return dq, dk, dv, None, None, None, None, None
     
     def cal_out(self, resid: torch.Tensor):
         if self.cfg.mode == "top_k":
@@ -351,9 +321,13 @@ class LowRankSparseAttention(nn.Module):
                 self.cfg.virtual_kv_num == 0 and # same query and key length
                 self.cfg.d_ov_head == 1):
                 q, k, v = self.cal_q_k_v(resid)
-                
-                z, l1 = self.flash_lorsa_topk(q, k, v, self.cfg.top_k, causal=True, softmax_scale=self.cfg.attn_scale)
-                
+                flash_dtype=torch.bfloat16
+                z, l1 = self.FlashLorsaTopkFunc.apply(
+                    q.to(flash_dtype), k.to(flash_dtype), v.to(flash_dtype),
+                    self.cfg.top_k, self.W_O, self.cfg.use_z_relu,
+                    True, 1 / self.cfg.attn_scale,
+                )
+                z = z.to(self.cfg.dtype)
             else:
                 # flash attention
                 if (self.cfg.use_flash_lorsa and 
@@ -362,39 +336,64 @@ class LowRankSparseAttention(nn.Module):
                     self.cfg.d_ov_head == 1):
                     q, k, v = self.cal_q_k_v(resid)
                     v = v.reshape(v.shape[0], v.shape[1], self.cfg.n_qk_heads, self.cfg.d_qk_head)
+                    flash_dtype=torch.bfloat16
                     with sdpa_kernel(backends=[SDPBackend.FLASH_ATTENTION]):
-                        z = F.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2))
+                        z = F.scaled_dot_product_attention(q.transpose(1, 2).to(flash_dtype), k.transpose(1, 2).to(flash_dtype), v.transpose(1, 2).to(flash_dtype))
                     z = z.transpose(1, 2)
                     z = z.reshape(z.shape[0], z.shape[1], self.cfg.n_ov_heads, self.cfg.d_ov_head)
+                    
+                    with torch.no_grad():
+                        # l1: (batch_size, query_pos, n_heads)
+                        if self.cfg.use_z_relu:
+                            l1 = torch.nn.functional.relu(z.squeeze(-1)) * torch.norm(self.W_O, p=2, dim=2).view(1, 1, self.cfg.n_ov_heads).to(flash_dtype)
+                        else:
+                            l1 = torch.abs(z.squeeze(-1)) * torch.norm(self.W_O, p=2, dim=2).view(1, 1, self.cfg.n_ov_heads)
+                        
+                        # topk_values, topk_indices = l1.topk(k=self.cfg.top_k, dim=2)
+                        
+                        # B, S, _ = l1.shape
+                        # mask = torch.zeros_like(l1, dtype=bool)
+                        # mask[torch.arange(B).view(B, 1, 1).expand(B, S, self.cfg.top_k), torch.arange(S).view(1, S, 1).expand(B, S, self.cfg.top_k), topk_indices] = True
+                
+                        # topk
+                        k_smallest = self.cfg.n_ov_heads - self.cfg.top_k + 1
+
+                        # top_k_values: (batch_size, query_pos)
+                        top_k_values, _ = torch.kthvalue(l1, k=k_smallest, dim=2)
+                        
+                        # top_k_mask: (batch_size, query_pos, n_heads)
+                        mask = l1 > top_k_values.unsqueeze(-1)
+                        
+                    z = z.to(self.cfg.dtype)
                     
                 # simple attention
                 else:
                     z = self.cal_z_with_h(resid)
                     
-                with torch.no_grad():
-                    # l1: (batch_size, query_pos, n_heads)
-                    if self.cfg.use_z_relu:
-                        l1 = torch.nn.functional.relu(z.squeeze(-1)) * torch.norm(self.W_O, p=2, dim=2).view(1, 1, self.cfg.n_ov_heads)
-                    else:
-                        l1 = torch.abs(z.squeeze(-1)) * torch.norm(self.W_O, p=2, dim=2).view(1, 1, self.cfg.n_ov_heads)
-                    
-                    # topk_values, topk_indices = l1.topk(k=self.cfg.top_k, dim=2)
-                    
-                    # B, S, _ = l1.shape
-                    # mask = torch.zeros_like(l1, dtype=bool)
-                    # mask[torch.arange(B).view(B, 1, 1).expand(B, S, self.cfg.top_k), torch.arange(S).view(1, S, 1).expand(B, S, self.cfg.top_k), topk_indices] = True
-            
-                    # topk
-                    k_smallest = self.cfg.n_ov_heads - self.cfg.top_k + 1
+                    with torch.no_grad():
+                        # l1: (batch_size, query_pos, n_heads)
+                        if self.cfg.use_z_relu:
+                            l1 = torch.nn.functional.relu(z.squeeze(-1)) * torch.norm(self.W_O, p=2, dim=2).view(1, 1, self.cfg.n_ov_heads)
+                        else:
+                            l1 = torch.abs(z.squeeze(-1)) * torch.norm(self.W_O, p=2, dim=2).view(1, 1, self.cfg.n_ov_heads)
+                        
+                        _, topk_indices = l1.topk(k=self.cfg.top_k, dim=2)
+                        
+                        B, S, _ = l1.shape
+                        mask = torch.zeros_like(l1, dtype=bool)
+                        mask[torch.arange(B).view(B, 1, 1).expand(B, S, self.cfg.top_k), torch.arange(S).view(1, S, 1).expand(B, S, self.cfg.top_k), topk_indices] = True
+                
+                        # topk
+                        # k_smallest = self.cfg.n_ov_heads - self.cfg.top_k + 1
 
-                    # top_k_values: (batch_size, query_pos)
-                    top_k_values, _ = torch.kthvalue(l1, k=k_smallest, dim=2)
+                        # # top_k_values: (batch_size, query_pos)
+                        # top_k_values, _ = torch.kthvalue(l1, k=k_smallest, dim=2)
+                        
+                        # # top_k_mask: (batch_size, query_pos, n_heads)
+                        # mask = l1 > top_k_values.unsqueeze(-1)
                     
-                    # top_k_mask: (batch_size, query_pos, n_heads)
-                    mask = l1 >= top_k_values.unsqueeze(-1)
-                    
-                    z = z * mask.unsqueeze(-1)
-                    l1 = l1 * mask
+                z = z * mask.unsqueeze(-1)
+                l1 = l1 * mask
                     
         elif self.cfg.mode == "jumprelu":
             # flash attention

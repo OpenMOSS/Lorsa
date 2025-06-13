@@ -14,6 +14,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import LambdaLR
+scaler = torch.GradScaler('cuda')
 
 from tqdm import tqdm
 import copy
@@ -75,24 +76,35 @@ def train_lorsa(lorsa: LowRankSparseAttention, cfg: LorsaTrainConfig, activation
         hook_in, hook_out = lorsa.scale_norm(hook_in, hook_out)
         
         # forward
-        out, l1 = lorsa.forward(hook_in)
-        if cfg.mode == "top_k":
-            mse_loss = F.mse_loss(out[filter_mask], hook_out[filter_mask])
-            loss = mse_loss
-        else:
-            raise NotImplementedError
-        
+        with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+            out, l1 = lorsa.forward(hook_in)
+            if cfg.mode == "top_k":
+                mse_loss = F.mse_loss(out[filter_mask], hook_out[filter_mask])
+                loss = mse_loss
+            else:
+                raise NotImplementedError
         
         # back propagation
-        optimizer.zero_grad() 
-        loss.backward()
+        optimizer.zero_grad()
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
         grad_norm = torch.nn.utils.clip_grad_norm_(
             lorsa.parameters(),
             max_norm=cfg.clip_grad_norm if cfg.clip_grad_norm > 0 else math.inf,
         )
+        scaler.step(optimizer)
+        scaler.update()
         
-        # optimization
-        optimizer.step()
+        # # back propagation
+        # optimizer.zero_grad() 
+        # loss.backward()
+        # grad_norm = torch.nn.utils.clip_grad_norm_(
+        #     lorsa.parameters(),
+        #     max_norm=cfg.clip_grad_norm if cfg.clip_grad_norm > 0 else math.inf,
+        # )
+        
+        # # optimization
+        # optimizer.step()
 
         # update head info
         sampled_tokens += filter_mask.sum().item()

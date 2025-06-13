@@ -1,50 +1,7 @@
-"""
-*Experimental* implementation of FlashAttention in Triton.
-Tested with triton==2.0.0.dev20221202.
-Triton 2.0 has a new backend (MLIR) but seems like it doesn't yet work for head dimensions
-other than 64:
-https://github.com/openai/triton/blob/d376020f90002757eea3ea9475d4f7cfc2ec5ead/python/triton/ops/flash_attention.py#L207
-We'll update this implementation with the new Triton backend once this is fixed.
-
-We use the FlashAttention implementation from Phil Tillet a starting point.
-https://github.com/openai/triton/blob/master/python/tutorials/06-fused-attention.py
-
-Changes:
-- Implement both causal and non-causal attention.
-- Implement both self-attention and cross-attention.
-- Support arbitrary seqlens (not just multiples of 128), for both forward and backward.
-- Support all head dimensions up to 128 (not just 16, 32, 64, 128), for both forward and backward.
-- Support attention bias.
-- Speed up the forward pass a bit, and only store the LSE instead of m and l.
-- Make the backward for d=128 much faster by reducing register spilling.
-- Optionally parallelize the backward pass across seqlen_k, to deal with the case of
-small batch size * nheads.
-
-Caution:
-- This is an *experimental* implementation. The forward pass should be quite robust but
-I'm not 100% sure that the backward pass doesn't have race conditions (due to the Triton compiler).
-- This implementation has only been tested on A100.
-- If you plan to use headdim other than 64 and 128, you should test for race conditions
-(due to the Triton compiler), as done in tests/test_flash_attn.py
-"test_flash_attn_triton_race_condition". I've tested and fixed many race conditions
-for different head dimensions (40, 48, 64, 128, 80, 88, 96), but I'm still not 100% confident
-that there are none left for other head dimensions.
-
-Differences between this Triton version and the CUDA version:
-- Triton version doesn't support dropout.
-- Triton forward is generally faster than CUDA forward, while Triton backward is
-generally slower than CUDA backward. Overall Triton forward + backward is slightly slower
-than CUDA forward + backward.
-- Triton version doesn't support different sequence lengths in a batch (i.e., RaggedTensor/NestedTensor).
-- Triton version supports attention bias, while CUDA version doesn't.
-"""
-
 import math
 
 import torch
-from torch._prims_common import mask_tensor
 import torch.nn.functional as F
-import time
 import triton
 import triton.language as tl
 
@@ -120,7 +77,6 @@ def _fwd_kernel(
         V + off_b * stride_vb + off_h * stride_vh + (offs_n * stride_vn)[:, None]
     )
 
-    t_ptrs = TMP + off_hb * seqlen_q_rounded + offs_m
     lse_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
     m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
     acc_o = tl.zeros([BLOCK_M, 1], dtype=tl.float32)
@@ -161,7 +117,7 @@ def _fwd_kernel(
                     mask=((start_n + offs_n)[:, None] < seqlen_k) & (offs_d[None, :] < headdim),
                     other=0.0,
                 )
-        qk = tl.dot(q, tl.trans(k))
+        qk = tl.dot(q, tl.trans(k), input_precision="tf32x3")
         if not EVEN_N:
             qk += tl.where((start_n + offs_n)[None, :] < seqlen_k, 0, float("-inf"))
         if IS_CAUSAL:
@@ -172,8 +128,6 @@ def _fwd_kernel(
         l_ij = tl.sum(p, 1)
 
         acc_o_scale = tl.exp(m_i - m_ij)
-        tl.store(t_ptrs, acc_o_scale)
-        acc_o_scale = tl.load(t_ptrs)
         acc_o = acc_o * acc_o_scale[:, None]
 
         if EVEN_N & EVEN_M:
@@ -193,8 +147,6 @@ def _fwd_kernel(
         lse_i = m_ij + tl.log(l_i_new)
 
     o_scale = tl.exp(m_i - lse_i)
-    tl.store(t_ptrs, o_scale)
-    o_scale = tl.load(t_ptrs)
     acc_o = acc_o * o_scale[:, None]
 
     start_m = tl.program_id(0)
@@ -443,7 +395,7 @@ def _flash_attn_forward(q, k, v, causal=False, softmax_scale=None):
     # assert v.shape == (batch, seqlen_k, nheads, 1)
     assert d <= 128, "FlashAttention only support head dimensions up to 128"
     assert q.dtype == k.dtype == v.dtype, "All tensors must have the same type"
-    assert q.dtype in [torch.float16, torch.bfloat16], "Only support fp16 and bf16"
+    # assert q.dtype in [torch.float16, torch.bfloat16], "Only support fp16 and bf16"
     assert q.is_cuda and k.is_cuda and v.is_cuda
     softmax_scale = softmax_scale or 1.0 / math.sqrt(d)
 
@@ -455,6 +407,7 @@ def _flash_attn_forward(q, k, v, causal=False, softmax_scale=None):
     BLOCK_HEADDIM = max(triton.next_power_of_2(d), 16)
     BLOCK = 128
     num_warps = 4 if d <= 64 else 8
+    # if batch_size=32, it will rise ""
     grid = lambda META: (triton.cdiv(seqlen_q, META["BLOCK_M"]), batch, nheads)
     _fwd_kernel[grid](
         q,
@@ -503,7 +456,7 @@ def _flash_attn_backward(
         do = do.contiguous()
     batch, seqlen_q, nheads, d = q.shape
     _, seqlen_k, _, _ = k.shape
-    _, _, TOPK, _ = topk_indices.shape
+    _, _, TOPK = topk_indices.shape
     assert d <= 128
     seqlen_q_rounded = math.ceil(seqlen_q / 128) * 128
     assert lse.shape == (batch, nheads, seqlen_q_rounded)
@@ -604,50 +557,3 @@ def _flash_attn_backward(
     )
     dk.copy_(dk_accum)
     dv.copy_(dv_accum)
-
-class FlashLorsaTopkFunc(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, q, k, v, topk, causal=False, softmax_scale=None):
-        """
-        q: (batch_size, seqlen_q, nheads, headdim)
-        k: (batch_size, seqlen_k, nheads, headdim)
-        v: (batch_size, seqlen_k, nheads, 1)
-        """
-        # Make sure that the last dimension is contiguous
-        q, k, v = [x if x.stride(-1) == 1 else x.contiguous() for x in [q, k, v]]
-        o, lse, ctx.softmax_scale = _flash_attn_forward(
-            q, k, v, causal=causal, softmax_scale=softmax_scale
-        )
-        topk_values, topk_indices = o.topk(k=topk, dim=2)
-        ctx.save_for_backward(q, k, v, o, lse, topk_indices)
-        ctx.causal = causal
-        return o
-
-    @staticmethod
-    def backward(ctx, do):
-        q, k, v, o, lse, topk_indices = ctx.saved_tensors
-        assert not ctx.needs_input_grad[3], "FlashAttention does not support bias gradient yet"
-        # Triton's autotune causes the Tensor._version to change, and so Pytorch autograd
-        # does a memcpy. To avoid this we run in inference_mode, which doesn't track the version.
-        with torch.inference_mode():
-            dq = torch.zeros_like(q)
-            dk = torch.zeros_like(k)
-            dv = torch.zeros_like(v)
-            _flash_attn_backward(
-                do,
-                q,
-                k,
-                v,
-                o,
-                lse,
-                topk_indices,
-                dq,
-                dk,
-                dv,
-                causal=ctx.causal,
-                softmax_scale=ctx.softmax_scale,
-            )
-        return dq, dk, dv, None, None, None
-
-
-flash_lorsa_topk_func = FlashLorsaTopkFunc.apply
