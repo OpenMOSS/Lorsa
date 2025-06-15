@@ -127,7 +127,7 @@ class LorsaTrainConfig:
     lr_warm_up_tokens: int
     lr_cool_down_tokens: int
     clip_grad_norm: float
-    mode: Literal["default", "top_k", "l1"] = "default"
+    mode: Literal["top_k", "jumprelu"] = "top_k"
     init_scale_parameters: bool = True
     
     # k config
@@ -135,9 +135,13 @@ class LorsaTrainConfig:
     start_k: Optional[int] = None
     end_k: Optional[int] = None
     k_warm_up_tokens: Optional[int] = None
-    
-    # l1 config
-    l1_coef: Optional[float] = None
+        
+    # jumprelu config
+    lambda_s: Optional[float] = None
+    lambda_p: Optional[float] = None
+    sparsity_c: Optional[float] = None
+    lambda_s_final: Optional[float] = None  # lambda_s的最终值，用于线性warmup
+    jumprelu_epsilon: Optional[float] = 2.0  # JumpReLU的epsilon参数
     
     # orig attention head config
     model_name: str

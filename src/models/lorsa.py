@@ -14,6 +14,45 @@ import einops
 from config import LorsaConfig
 from .kernel import _flash_attn_forward, _flash_attn_backward
 
+class JumpReLU(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, t, epsilon=2.0):
+        # 保存用于反向传播的输入
+        ctx.save_for_backward(x, t)
+        ctx.epsilon = epsilon
+        
+        # 计算阈值
+        threshold = torch.exp(t)
+        
+        threshold = threshold.view(1, 1, -1, 1)
+        
+        mask = x > threshold
+        output = x * mask
+        
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        x, t = ctx.saved_tensors
+        epsilon = ctx.epsilon
+        
+        # 计算阈值
+        threshold = torch.exp(t)
+        
+        threshold = threshold.view(1, 1, -1, 1)
+        
+        x_mask = x > threshold
+        grad_x = grad_output * x_mask
+        
+        diff = (x - threshold) / epsilon
+        t_mask = (diff > -0.5) & (diff < 0.5)
+        grad_t_values = -threshold * grad_output / epsilon
+        grad_t = grad_t_values * t_mask
+        
+        grad_t = grad_t.sum(dim=(0, 1, 3))
+        
+        return grad_x, grad_t, None
+
 class LowRankSparseAttention(nn.Module):
     def __init__(self, config: LorsaConfig):
         super(LowRankSparseAttention, self).__init__()
@@ -118,6 +157,13 @@ class LowRankSparseAttention(nn.Module):
             )
             self.register_buffer("rotary_sin", sin)
             self.register_buffer("rotary_cos", cos)
+            
+        if self.cfg.mode == "jumprelu":
+            self.log_threshold = nn.Parameter(
+                torch.full((self.cfg.n_ov_heads,), 0.1, dtype=self.cfg.dtype),
+                requires_grad=True,
+            )
+            self.jumprelu = JumpReLU.apply
     
     def initialize_parameters(self, **kwargs):
         allowed_params = {"W_Q", "W_K", "W_V", "W_O", "b_Q", "b_K", "b_V", "b_O"}
@@ -313,6 +359,41 @@ class LowRankSparseAttention(nn.Module):
                 )
             return dq, dk, dv, None, None, None, None, None
     
+    def apply_activation_function(self, z_pre_activation):
+        if self.cfg.mode == "top_k":
+            W_O_norms = torch.norm(self.W_O, p=2, dim=2).squeeze(-1)  # (n_heads)
+            if self.cfg.use_z_relu:
+                f_i = torch.nn.functional.relu(z_pre_activation.squeeze(-1))  # (batch_size, query_pos, n_heads)
+            else:
+                f_i = torch.abs(z_pre_activation.squeeze(-1))  # (batch_size, query_pos, n_heads)
+            
+            l1_weighted = f_i * W_O_norms.unsqueeze(0).unsqueeze(0)
+            
+            _, topk_indices = l1_weighted.topk(k=self.cfg.top_k, dim=2)
+            
+            B, S, _ = l1_weighted.shape
+            mask = torch.zeros_like(l1_weighted, dtype=bool)
+            mask[torch.arange(B).view(B, 1, 1).expand(B, S, self.cfg.top_k), 
+                 torch.arange(S).view(1, S, 1).expand(B, S, self.cfg.top_k), 
+                 topk_indices] = True
+            
+            z_post_activation = z_pre_activation * mask.unsqueeze(-1)
+            l1_weighted = l1_weighted * mask
+            
+        elif self.cfg.mode == "jumprelu":
+            epsilon = getattr(self.cfg, 'jumprelu_epsilon', 2.0)
+            z_post_activation = self.jumprelu(z_pre_activation, self.log_threshold, epsilon)
+            
+            # 计算l1_weighted: 激活后的值乘以W_O对应列的norm
+            W_O_norms = torch.norm(self.W_O, p=2, dim=2).squeeze(-1)  # (n_heads,)
+            f_i = torch.abs(z_post_activation.squeeze(-1))  # (batch_size, query_pos, n_heads)
+            l1_weighted = f_i * W_O_norms.unsqueeze(0).unsqueeze(0)
+            
+        else:
+            raise NotImplementedError(f"Mode {self.cfg.mode} not implemented")
+        
+        return z_post_activation, l1_weighted
+
     def cal_out(self, resid: torch.Tensor):
         if self.cfg.mode == "top_k":
             # topk with flash lorsa
@@ -322,12 +403,12 @@ class LowRankSparseAttention(nn.Module):
                 self.cfg.d_ov_head == 1):
                 q, k, v = self.cal_q_k_v(resid)
                 flash_dtype=torch.bfloat16
-                z, l1 = self.FlashLorsaTopkFunc.apply(
+                z_post_activation, l1_weighted = self.FlashLorsaTopkFunc.apply(
                     q.to(flash_dtype), k.to(flash_dtype), v.to(flash_dtype),
                     self.cfg.top_k, self.W_O, self.cfg.use_z_relu,
                     True, 1 / self.cfg.attn_scale,
                 )
-                z = z.to(self.cfg.dtype)
+                z_post_activation = z_post_activation.to(self.cfg.dtype)
             else:
                 # flash attention
                 if (self.cfg.use_flash_lorsa and 
@@ -338,87 +419,49 @@ class LowRankSparseAttention(nn.Module):
                     v = v.reshape(v.shape[0], v.shape[1], self.cfg.n_qk_heads, self.cfg.d_qk_head)
                     flash_dtype=torch.bfloat16
                     with sdpa_kernel(backends=[SDPBackend.FLASH_ATTENTION]):
-                        z = F.scaled_dot_product_attention(q.transpose(1, 2).to(flash_dtype), k.transpose(1, 2).to(flash_dtype), v.transpose(1, 2).to(flash_dtype))
-                    z = z.transpose(1, 2)
-                    z = z.reshape(z.shape[0], z.shape[1], self.cfg.n_ov_heads, self.cfg.d_ov_head)
-                    
-                    with torch.no_grad():
-                        # l1: (batch_size, query_pos, n_heads)
-                        if self.cfg.use_z_relu:
-                            l1 = torch.nn.functional.relu(z.squeeze(-1)) * torch.norm(self.W_O, p=2, dim=2).view(1, 1, self.cfg.n_ov_heads).to(flash_dtype)
-                        else:
-                            l1 = torch.abs(z.squeeze(-1)) * torch.norm(self.W_O, p=2, dim=2).view(1, 1, self.cfg.n_ov_heads)
-                        
-                        # topk_values, topk_indices = l1.topk(k=self.cfg.top_k, dim=2)
-                        
-                        # B, S, _ = l1.shape
-                        # mask = torch.zeros_like(l1, dtype=bool)
-                        # mask[torch.arange(B).view(B, 1, 1).expand(B, S, self.cfg.top_k), torch.arange(S).view(1, S, 1).expand(B, S, self.cfg.top_k), topk_indices] = True
-                
-                        # topk
-                        k_smallest = self.cfg.n_ov_heads - self.cfg.top_k + 1
-
-                        # top_k_values: (batch_size, query_pos)
-                        top_k_values, _ = torch.kthvalue(l1, k=k_smallest, dim=2)
-                        
-                        # top_k_mask: (batch_size, query_pos, n_heads)
-                        mask = l1 > top_k_values.unsqueeze(-1)
-                        
-                    z = z.to(self.cfg.dtype)
-                    
-                # simple attention
+                        z_pre_activation = F.scaled_dot_product_attention(q.transpose(1, 2).to(flash_dtype), k.transpose(1, 2).to(flash_dtype), v.transpose(1, 2).to(flash_dtype))
+                    z_pre_activation = z_pre_activation.transpose(1, 2).reshape(z_pre_activation.shape[0], z_pre_activation.shape[2], self.cfg.n_ov_heads, self.cfg.d_ov_head).to(self.cfg.dtype)
                 else:
-                    z = self.cal_z_with_h(resid)
-                    
-                    with torch.no_grad():
-                        # l1: (batch_size, query_pos, n_heads)
-                        if self.cfg.use_z_relu:
-                            l1 = torch.nn.functional.relu(z.squeeze(-1)) * torch.norm(self.W_O, p=2, dim=2).view(1, 1, self.cfg.n_ov_heads)
-                        else:
-                            l1 = torch.abs(z.squeeze(-1)) * torch.norm(self.W_O, p=2, dim=2).view(1, 1, self.cfg.n_ov_heads)
-                        
-                        _, topk_indices = l1.topk(k=self.cfg.top_k, dim=2)
-                        
-                        B, S, _ = l1.shape
-                        mask = torch.zeros_like(l1, dtype=bool)
-                        mask[torch.arange(B).view(B, 1, 1).expand(B, S, self.cfg.top_k), torch.arange(S).view(1, S, 1).expand(B, S, self.cfg.top_k), topk_indices] = True
+                    z_pre_activation = self.cal_z_with_h(resid)
                 
-                        # topk
-                        # k_smallest = self.cfg.n_ov_heads - self.cfg.top_k + 1
+                z_post_activation, l1_weighted = self.apply_activation_function(z_pre_activation)
 
-                        # # top_k_values: (batch_size, query_pos)
-                        # top_k_values, _ = torch.kthvalue(l1, k=k_smallest, dim=2)
-                        
-                        # # top_k_mask: (batch_size, query_pos, n_heads)
-                        # mask = l1 > top_k_values.unsqueeze(-1)
-                    
-                z = z * mask.unsqueeze(-1)
-                l1 = l1 * mask
+            # out: (batch_size, query_pos, d_model)
+            out = self.decode_z_with_W_O(z_post_activation)
+            return out, l1_weighted
                     
         elif self.cfg.mode == "jumprelu":
             # flash attention
-            if self.cfg.use_flash_lorsa and self.cfg.d_qk_head * self.cfg.n_qk_heads == self.cfg.d_ov_head * self.cfg.n_ov_heads and self.cfg.d_ov_head == 1:
+            if (self.cfg.use_flash_lorsa and 
+                self.cfg.d_qk_head * self.cfg.n_qk_heads == self.cfg.d_ov_head * self.cfg.n_ov_heads and 
+                self.cfg.virtual_kv_num == 0 and # same query and key length
+                self.cfg.d_ov_head == 1):
                 q, k, v = self.cal_q_k_v(resid)
-                v = v.reshape(resid.shape[0], resid.shape[1], self.cfg.n_qk_heads, self.cfg.d_qk_head)
-                z = F.scaled_dot_product_attention(q, k, v, attention_mask=self.mask[None, None, -q.shape[1]:, -k.shape[1]:])
-            # simple attention
+                v = v.reshape(v.shape[0], v.shape[1], self.cfg.n_qk_heads, self.cfg.d_qk_head)
+                flash_dtype=torch.bfloat16
+                with sdpa_kernel(backends=[SDPBackend.FLASH_ATTENTION]):
+                    z_pre_activation = F.scaled_dot_product_attention(q.transpose(1, 2).to(flash_dtype), k.transpose(1, 2).to(flash_dtype), v.transpose(1, 2).to(flash_dtype))
+                z_pre_activation = z_pre_activation.transpose(1, 2).reshape(z_pre_activation.shape[0], z_pre_activation.shape[2], self.cfg.n_ov_heads, self.cfg.d_ov_head).to(self.cfg.dtype)
             else:
-                z = self.cal_z_with_h(resid)
-                
-            if self.cfg.use_z_relu:
-                l1 = torch.nn.functional.relu(z.squeeze(-1)) * torch.norm(self.W_O, p=2, dim=2).view(1, 1, self.cfg.n_ov_heads)
-            else:
-                l1 = torch.abs(z.squeeze(-1)) * torch.norm(self.W_O, p=2, dim=2).view(1, 1, self.cfg.n_ov_heads)
+                z_pre_activation = self.cal_z_with_h(resid)
+            
+            z_post_activation, l1_weighted = self.apply_activation_function(z_pre_activation)
 
-        # out: (batch_size, query_pos, d_model)
-        out = self.decode_z_with_W_O(z)
-
-        return out, l1
+            # out: (batch_size, query_pos, d_model)
+            out = self.decode_z_with_W_O(z_post_activation)
+            return out, l1_weighted, z_pre_activation
 
     def forward(self, resid: torch.Tensor) -> torch.Tensor:
-        out, l1 = self.cal_out(resid) # Shape: (batch_size, query_pos, d_model), (batch_size, query_pos, n_heads)
-        out = out + self.b_O
-        return out, l1 # Shape: (batch_size, query_pos, d_model), (batch_size, query_pos, n_heads)
+        if self.cfg.mode == "top_k":
+            out, l1_weighted = self.cal_out(resid)
+            out = out + self.b_O
+            return out, l1_weighted
+        elif self.cfg.mode == "jumprelu":
+            out, l1_weighted, z_pre_activation = self.cal_out(resid)
+            out = out + self.b_O
+            return out, l1_weighted, z_pre_activation
+        else:
+            raise NotImplementedError(f"Mode {self.cfg.mode} not implemented")
     
     def rotate_every_two(
         self, x: Float[torch.Tensor, "... rotary_dim"]

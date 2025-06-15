@@ -12,7 +12,7 @@ from datasets import load_from_disk
 
 from models.lorsa import LowRankSparseAttention
 from config import LorsaTrainConfig, LorsaAnalyzeConfig, DataGenConfig
-from train import train_lorsa, debug_train_lorsa
+from train import train_lorsa
 from activations import TextActivationDataset, PresaveActivationDataset
 import wandb
 

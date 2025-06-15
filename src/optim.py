@@ -29,6 +29,23 @@ class LrWarmupScheduler:
             
     def get_lr(self):
         return self.optimizer.param_groups[0]['lr']
+
+class LambdaSWarmupScheduler:
+    def __init__(self, lambda_s_final, total_tokens):
+        self.lambda_s_final = lambda_s_final
+        self.total_tokens = total_tokens
+        self.current_tokens = 0
+        self.current_lambda_s = 0.0
+        
+    def update_lambda_s(self, current_tokens):
+        self.current_tokens = current_tokens
+        
+        # Linear warmup from 0 to lambda_s_final over entire training period
+        progress = min(self.current_tokens / self.total_tokens, 1.0)
+        self.current_lambda_s = self.lambda_s_final * progress
+        
+    def get_lambda_s(self):
+        return self.current_lambda_s
     
 class TopkWarmupScheduler:
     def __init__(self, lorsa: LowRankSparseAttention, start_k, end_k, k_scheduler_name, warm_up_tokens, total_tokens):
