@@ -32,6 +32,7 @@ class LorsaConfig:
     
     mode: Literal["top_k", "jumprelu"] = "top_k"
     top_k: Optional[int] = None
+    init_jumprelu_threshold: Optional[float] = 0.1
     
     avg_norm: dict = None
     
@@ -273,3 +274,7 @@ class DataGenConfig:
 
     # result config
     result_dir: str
+    
+    # other config
+    remove_bos_component: bool = False
+    layers_to_remove_bos: list = None

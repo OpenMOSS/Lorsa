@@ -14,7 +14,6 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import LambdaLR
-scaler = torch.GradScaler('cuda')
 
 from tqdm import tqdm
 import copy
@@ -28,9 +27,9 @@ from activations import MultiKeyDataset, ActivationDataset, PresaveActivationDat
 from optim import LrWarmupScheduler, TopkWarmupScheduler, LambdaSWarmupScheduler
 
 def train_lorsa(lorsa: LowRankSparseAttention, cfg: LorsaTrainConfig, activation_dataset: ActivationDataset):
-    hook_in, hook_out, filter_mask = activation_dataset.next(batch_size=cfg.buffer_size)
-    hook_in, hook_out = lorsa.scale_norm(hook_in, hook_out)
-    lorsa.initialize_parameters(b_O = hook_out[filter_mask].mean(dim=0).to(cfg.lorsa_config.dtype))
+    # hook_in, hook_out, filter_mask = activation_dataset.next(batch_size=cfg.buffer_size)
+    # hook_in, hook_out = lorsa.scale_norm(hook_in, hook_out)
+    # lorsa.initialize_parameters(b_O = hook_out[filter_mask].mean(dim=0).to(cfg.lorsa_config.dtype))
 
     # optimizer and scheduler
     optimizer = torch.optim.Adam(lorsa.parameters(), lr=0, betas=(0.9, 0.999), weight_decay=0)
@@ -43,7 +42,37 @@ def train_lorsa(lorsa: LowRankSparseAttention, cfg: LorsaTrainConfig, activation
         lambda_s_scheduler = LambdaSWarmupScheduler(cfg.lambda_s_final, cfg.total_tokens)
         lambda_s_scheduler.update_lambda_s(0)
 
-    if cfg.init_scale_parameters:
+    if cfg.mode == "jumprelu":
+        with torch.no_grad():
+            nn.init.xavier_uniform_(lorsa.W_Q)
+            nn.init.xavier_uniform_(lorsa.W_K)
+            
+            n = lorsa.cfg.d_model
+            bound_O = 1.0 / math.sqrt(n)
+            nn.init.uniform_(lorsa.W_O, -bound_O, bound_O)
+            
+            m = lorsa.cfg.d_qk_head
+            bound_V = 1.0 / math.sqrt(m)
+            nn.init.uniform_(lorsa.W_V, -bound_V, bound_V)
+            
+            hook_in, hook_out, filter_mask = activation_dataset.next(batch_size=cfg.batch_size)
+            hook_in, hook_out = lorsa.scale_norm(hook_in, hook_out)
+            
+            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                _, _, z_pre_activation = lorsa.forward(hook_in)  # Shape: (batch_size, query_pos, n_heads, d_head)
+            
+            z_values = z_pre_activation.squeeze(-1)
+            z_filtered = z_values[filter_mask]
+            
+            medians = torch.median(z_filtered, dim=0).values  # Shape: (n_heads,)
+            
+            current_threshold = torch.exp(lorsa.log_threshold)  # Shape: (n_heads,)
+            
+            lorsa.b_V.data = (current_threshold - medians).unsqueeze(-1)  # Shape: (n_heads, d_head)
+            
+            lorsa.initialize_parameters(b_O = hook_out[filter_mask].mean(dim=0).to(cfg.lorsa_config.dtype))
+        
+    elif cfg.init_scale_parameters:
         with torch.no_grad():
             with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
                 hook_in, hook_out, filter_mask = activation_dataset.next(batch_size=cfg.batch_size)
@@ -115,14 +144,12 @@ def train_lorsa(lorsa: LowRankSparseAttention, cfg: LorsaTrainConfig, activation
         
         # back propagation
         optimizer.zero_grad()
-        scaler.scale(loss).backward()
-        scaler.unscale_(optimizer)
+        loss.backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(
             lorsa.parameters(),
             max_norm=cfg.clip_grad_norm if cfg.clip_grad_norm > 0 else math.inf,
         )
-        scaler.step(optimizer)
-        scaler.update()
+        optimizer.step()
         
         # update head info
         sampled_tokens += filter_mask.sum().item()
@@ -161,7 +188,7 @@ def train_lorsa(lorsa: LowRankSparseAttention, cfg: LorsaTrainConfig, activation
             "mse_loss": round(mse_loss.item(), 3), 
             "ev": round(explained_variance.mean().item(), 2), 
             **({'k': lorsa.cfg.top_k} if cfg.mode == 'top_k' else {}),
-            **({"l1": round(l1_weighted[filter_mask].sum(dim=-1).mean().item(), 1)} if cfg.mode == "top_k" or cfg.mode == "jumprelu" else {}),
+            **({"l0": round((l1_weighted != 0.).to(torch.float32)[filter_mask].sum(dim=-1).mean().item(), 1)} if cfg.mode == "jumprelu" else {}),
         }
         if cfg.mode == "jumprelu":
             postfix_dict.update({
@@ -183,8 +210,8 @@ def train_lorsa(lorsa: LowRankSparseAttention, cfg: LorsaTrainConfig, activation
             log_dict = {"details/sampled_tokens": sampled_tokens,
                         "details/learning_rate": lr_scheduler.get_lr(),
                         "loss/mse_loss": mse_loss.item(),
-                        **({"loss/sparsity_loss": sparsity_loss.item(), 
-                            "loss/penalty_loss": penalty_loss.item(),
+                        **({"loss/sparsity_loss": (current_lambda_s * sparsity_loss).item(),
+                            "loss/penalty_loss": (cfg.lambda_p * penalty_loss).item(),
                             "loss/total_loss": loss.item(),
                             "details/lambda_s": current_lambda_s} if cfg.mode == "jumprelu" else {}),
                         "metrics/explained_variance": explained_variance.mean().item(),
@@ -199,9 +226,8 @@ def train_lorsa(lorsa: LowRankSparseAttention, cfg: LorsaTrainConfig, activation
                         **({"sparsity/below 1e-5": (head_use_count / tokens_count < 1e-5).sum().item()} if (cfg.mode == "top_k" or cfg.mode == "jumprelu") and tokens_count > 1e5 else {}),
                         **({"sparsity/below 1e-6": (head_use_count / tokens_count < 1e-6).sum().item()} if (cfg.mode == "top_k" or cfg.mode == "jumprelu") and tokens_count > 1e6 else {}),
                         **({"sparsity/top_k": lorsa.cfg.top_k} if cfg.mode == "top_k" else {}),
-                        **({"metrics/l1": l1_weighted.sum(dim=-1).mean().item()} if cfg.mode == "top_k" or cfg.mode == "jumprelu" else {}),
-                        **({"metrics/threshold_mean": torch.exp(lorsa.log_threshold).mean().item(),
-                            "metrics/l1_weighted": l1_weighted[filter_mask].sum(dim=-1).mean().item()} if cfg.mode == "jumprelu" else {}),
+                        **({"metrics/l1": l1_weighted[filter_mask].sum(dim=-1).mean().item()} if cfg.mode == "top_k" or cfg.mode == "jumprelu" else {}),
+                        **({"metrics/threshold_mean": torch.exp(lorsa.log_threshold).mean().item()} if cfg.mode == "jumprelu" else {}),
                         }
             wandb.log(log_dict,
                       step=step)

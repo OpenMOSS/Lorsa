@@ -12,7 +12,7 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 import einops
 
 from config import LorsaConfig
-from .kernel import _flash_attn_forward, _flash_attn_backward
+from .kernel import _flash_attn_forward, _topk_flash_attn_backward, _flash_attn_backward
 
 class JumpReLU(torch.autograd.Function):
     @staticmethod
@@ -160,7 +160,7 @@ class LowRankSparseAttention(nn.Module):
             
         if self.cfg.mode == "jumprelu":
             self.log_threshold = nn.Parameter(
-                torch.full((self.cfg.n_ov_heads,), 0.1, dtype=self.cfg.dtype),
+                torch.full((self.cfg.n_ov_heads,), self.cfg.init_jumprelu_threshold, dtype=self.cfg.dtype),
                 requires_grad=True,
             )
             self.jumprelu = JumpReLU.apply
@@ -343,7 +343,7 @@ class LowRankSparseAttention(nn.Module):
                 dq = torch.zeros_like(q)
                 dk = torch.zeros_like(k)
                 dv = torch.zeros_like(v)
-                _flash_attn_backward(
+                _topk_flash_attn_backward(
                     do,
                     q,
                     k,
@@ -359,6 +359,48 @@ class LowRankSparseAttention(nn.Module):
                 )
             return dq, dk, dv, None, None, None, None, None
     
+    class FlashLorsaFunc(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, q, k, v, causal=False, softmax_scale=None):
+            """
+            q: (batch_size, seqlen_q, nheads, headdim)
+            k: (batch_size, seqlen_k, nheads, headdim)
+            v: (batch_size, seqlen_k, nheads, 1)
+            """
+            # Make sure that the last dimension is contiguous
+            q, k, v = [x if x.stride(-1) == 1 else x.contiguous() for x in [q, k, v]]
+            o, lse, ctx.softmax_scale = _flash_attn_forward(
+                q, k, v, causal=causal, softmax_scale=softmax_scale
+            )
+            ctx.save_for_backward(q, k, v, o, lse)
+            ctx.causal = causal
+            return o
+        
+        @staticmethod
+        def backward(ctx, do):
+            q, k, v, o, lse = ctx.saved_tensors
+            assert not ctx.needs_input_grad[3], "FlashAttention does not support bias gradient yet"
+            # Triton's autotune causes the Tensor._version to change, and so Pytorch autograd
+            # does a memcpy. To avoid this we run in inference_mode, which doesn't track the version.
+            with torch.inference_mode():
+                dq = torch.empty_like(q)
+                dk = torch.empty_like(k)
+                dv = torch.empty_like(v)
+                _flash_attn_backward(
+                    do,
+                    q,
+                    k,
+                    v,
+                    o,
+                    lse,
+                    dq,
+                    dk,
+                    dv,
+                    causal=ctx.causal,
+                    softmax_scale=ctx.softmax_scale,
+                )
+            return dq, dk, dv, None, None, None
+            
     def apply_activation_function(self, z_pre_activation):
         if self.cfg.mode == "top_k":
             W_O_norms = torch.norm(self.W_O, p=2, dim=2).squeeze(-1)  # (n_heads)
@@ -431,20 +473,32 @@ class LowRankSparseAttention(nn.Module):
             return out, l1_weighted
                     
         elif self.cfg.mode == "jumprelu":
-            # flash attention
-            if (self.cfg.use_flash_lorsa and 
-                self.cfg.d_qk_head * self.cfg.n_qk_heads == self.cfg.d_ov_head * self.cfg.n_ov_heads and 
+            if (self.cfg.use_flash_lorsa and
+                self.cfg.n_qk_heads == self.cfg.n_ov_heads and
                 self.cfg.virtual_kv_num == 0 and # same query and key length
                 self.cfg.d_ov_head == 1):
                 q, k, v = self.cal_q_k_v(resid)
-                v = v.reshape(v.shape[0], v.shape[1], self.cfg.n_qk_heads, self.cfg.d_qk_head)
                 flash_dtype=torch.bfloat16
-                with sdpa_kernel(backends=[SDPBackend.FLASH_ATTENTION]):
-                    z_pre_activation = F.scaled_dot_product_attention(q.transpose(1, 2).to(flash_dtype), k.transpose(1, 2).to(flash_dtype), v.transpose(1, 2).to(flash_dtype))
-                z_pre_activation = z_pre_activation.transpose(1, 2).reshape(z_pre_activation.shape[0], z_pre_activation.shape[2], self.cfg.n_ov_heads, self.cfg.d_ov_head).to(self.cfg.dtype)
+                z_pre_activation = self.FlashLorsaFunc.apply(
+                    q.to(flash_dtype), k.to(flash_dtype), v.to(flash_dtype),
+                    True, 1 / self.cfg.attn_scale,
+                )
+                z_pre_activation = z_pre_activation.to(self.cfg.dtype)
             else:
-                z_pre_activation = self.cal_z_with_h(resid)
-            
+                # flash attention
+                if (self.cfg.use_flash_lorsa and 
+                    self.cfg.d_qk_head * self.cfg.n_qk_heads == self.cfg.d_ov_head * self.cfg.n_ov_heads and 
+                    self.cfg.virtual_kv_num == 0 and # same query and key length
+                    self.cfg.d_ov_head == 1):
+                    q, k, v = self.cal_q_k_v(resid)
+                    v = v.reshape(v.shape[0], v.shape[1], self.cfg.n_qk_heads, self.cfg.d_qk_head)
+                    flash_dtype=torch.bfloat16
+                    with sdpa_kernel(backends=[SDPBackend.FLASH_ATTENTION]):
+                        z_pre_activation = F.scaled_dot_product_attention(q.transpose(1, 2).to(flash_dtype), k.transpose(1, 2).to(flash_dtype), v.transpose(1, 2).to(flash_dtype))
+                    z_pre_activation = z_pre_activation.transpose(1, 2).reshape(z_pre_activation.shape[0], z_pre_activation.shape[2], self.cfg.n_ov_heads, self.cfg.d_ov_head).to(self.cfg.dtype)
+                else:
+                    z_pre_activation = self.cal_z_with_h(resid)
+                
             z_post_activation, l1_weighted = self.apply_activation_function(z_pre_activation)
 
             # out: (batch_size, query_pos, d_model)
