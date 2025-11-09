@@ -42,26 +42,15 @@ If you use Lorsa in your research, please cite:
 
 ```bibtex
 @article{He2025Lorsa,
-  author       = {Zhengfu He and
-                  Junxuan Wang and
-                  Rui Lin and
-                  Xuyang Ge and
-                  Wentao Shu and
-                  Qiong Tang and
-                  Junping Zhang and
-                  Xipeng Qiu},
-  title        = {Towards Understanding the Nature of Attention with Low-Rank Sparse
-                  Decomposition},
-  journal      = {CoRR},
-  volume       = {abs/2504.20938},
-  year         = {2025},
-  url          = {https://doi.org/10.48550/arXiv.2504.20938},
-  doi          = {10.48550/ARXIV.2504.20938},
-  eprinttype    = {arXiv},
-  eprint       = {2504.20938},
-  timestamp    = {Sun, 25 May 2025 20:50:39 +0200},
-  biburl       = {https://dblp.org/rec/journals/corr/abs-2504-20938.bib},
-  bibsource    = {dblp computer science bibliography, https://dblp.org}
+  author    = {Zhengfu He and Junxuan Wang and Rui Lin and Xuyang Ge and 
+               Wentao Shu and Qiong Tang and Junping Zhang and Xipeng Qiu},
+  title     = {Towards Understanding the Nature of Attention with Low-Rank Sparse Decomposition},
+  journal   = {CoRR},
+  volume    = {abs/2504.20938},
+  year      = {2025},
+  url       = {https://arxiv.org/abs/2504.20938},
+  eprint    = {2504.20938},
+  eprinttype = {arXiv}
 }
 ```
 
